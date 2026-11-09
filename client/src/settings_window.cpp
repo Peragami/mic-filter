@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -30,11 +31,15 @@ constexpr int S_GROUP_DELETE = 2008;
 constexpr int S_GROUP_ALL_ON = 2009;
 constexpr int S_GROUP_ALL_OFF = 2010;
 constexpr int S_MOVE_BUTTON = 2011;
+constexpr int S_BLOCK_CREATE = 2012;
 constexpr int S_APPLY = 2017;
 constexpr int S_CLOSE = 2018;
+// Block header pool ids: HB_BASE + pool * 3 + {0 name, 1 collapse, 2 dissolve}
+constexpr int HB_BASE = 4400;
+constexpr int kMaxHeaderPool = 8;
 
 // Row control ids: R_BASE + slot * 16 + sub
-// sub: 0 = up, 1 = down, 2 = toggle, 3 = breath (gate only), 4+j = knob slider j
+// sub: 2 = toggle (also the drag handle), 3 = breath (gate only), 4+j = knob slider j
 constexpr int R_BASE = 4000;
 constexpr int kRowH = 46;
 constexpr int kNumSlots = 15;
@@ -46,7 +51,7 @@ const char* kSlotKeys[kNumSlots] = {
 
 struct RowControls
 {
-    HWND up = nullptr, down = nullptr, toggle = nullptr, tag = nullptr;
+    HWND toggle = nullptr, tag = nullptr;
     HWND breath = nullptr;              // gate row only
     HWND knobLabel[3] = {};
     HWND knobSlider[3] = {};
@@ -59,6 +64,34 @@ HWND g_parent = nullptr;
 HWND g_panel = nullptr;
 HWND g_frame = nullptr;
 RowControls g_rows[kNumSlots];
+
+// Block header pool (blocks are dynamic, headers are reused controls).
+struct HeaderControls
+{
+    HWND nameBtn = nullptr, collapseBtn = nullptr, dissolveBtn = nullptr;
+    int blockIdx = -1;
+};
+HeaderControls g_headers[kMaxHeaderPool];
+
+// Display items of the chain view: block headers + visible rows.
+struct DisplayItem
+{
+    bool header = false;
+    int blockIdx = -1;   // when header
+    std::string key;     // when row
+    int top = 0, height = 0;
+};
+std::vector<DisplayItem> g_items;
+
+// Drag state (rows and block headers are dragged by their buttons).
+HWND g_dragHwnd = nullptr;
+DWORD_PTR g_dragRef = 0;
+bool g_dragging = false;
+int g_dragStartPanelY = 0;
+int g_dragPanelY = 0;
+int g_dragKind = 0; // 1 = row, 2 = block
+std::string g_dragKey;
+int g_dragBlock = -1;
 std::wstring g_mainCurrent;
 Preset g_edit;
 bool g_editIsMainCurrent = false;
@@ -230,17 +263,58 @@ bool PromptText (HWND parent, const wchar_t* title, const std::wstring& initial,
     return g_prompt.ok;
 }
 } // namespace
-
 namespace
 {
-// --- Chain view -------------------------------------------------------------
+int BlockOf (const std::string& key)
+{
+    for (size_t b = 0; b < g_edit.blocks.size(); ++b)
+        for (const auto& k : g_edit.blocks[b].filters)
+            if (k == key) return (int) b;
+    return -1;
+}
+
+void BuildItems()
+{
+    g_items.clear();
+    std::set<int> emitted;
+    for (const auto& key : g_edit.order)
+    {
+        const int b = BlockOf (key);
+        if (b >= 0)
+        {
+            if (!emitted.count (b))
+            {
+                emitted.insert (b);
+                DisplayItem h;
+                h.header = true;
+                h.blockIdx = b;
+                h.height = 28;
+                g_items.push_back (h);
+            }
+            if (g_edit.blocks[(size_t) b].collapsed) continue; // member hidden
+        }
+        DisplayItem r;
+        r.key = key;
+        r.height = kRowH;
+        g_items.push_back (r);
+    }
+    int y = 0;
+    for (auto& it : g_items) { it.top = y; y += it.height; }
+}
+
+int ContentHeight()
+{
+    return g_items.empty() ? 0 : g_items.back().top + g_items.back().height;
+}
+
 void LayoutRows()
 {
     if (!g_panel) return;
+    BuildItems();
     RECT rc {};
     GetClientRect (g_panel, &rc);
     const int panelH = (int) (rc.bottom - rc.top);
-    const int contentH = kNumSlots * kRowH;
+    const int contentH = ContentHeight();
     const int maxScroll = std::max (0, contentH - panelH);
     if (g_scroll > maxScroll) g_scroll = maxScroll;
     if (g_scroll < 0) g_scroll = 0;
@@ -248,33 +322,74 @@ void LayoutRows()
     SCROLLINFO si { sizeof (si), SIF_RANGE | SIF_PAGE | SIF_POS, 0, contentH, (UINT) panelH, g_scroll, 0 };
     SetScrollInfo (g_panel, SB_VERT, &si, TRUE);
 
-    for (size_t pos = 0; pos < g_edit.order.size(); ++pos)
+    std::set<int> shownSlots;
+    int headerPool = 0;
+    bool framePlaced = false;
+    for (const auto& item : g_items)
     {
-        const int s = SlotOf (g_edit.order[pos]);
+        const int y = item.top - g_scroll + 2;
+        if (item.header)
+        {
+            if (headerPool >= kMaxHeaderPool) continue;
+            HeaderControls& h = g_headers[headerPool++];
+            h.blockIdx = item.blockIdx;
+            const OrderBlock& blk = g_edit.blocks[(size_t) item.blockIdx];
+            const std::wstring text = std::wstring (blk.collapsed ? L"▶ " : L"▼ ") + blk.name +
+                                      L"（" + std::to_wstring (blk.filters.size()) + L"）";
+            SetWindowTextW (h.nameBtn, text.c_str());
+            SetWindowTextW (h.collapseBtn, blk.collapsed ? L"開く" : L"閉じる");
+            SetWindowPos (h.nameBtn, nullptr, 30, y, 470, 24, SWP_NOZORDER | SWP_SHOWWINDOW);
+            SetWindowPos (h.collapseBtn, nullptr, 508, y, 80, 24, SWP_NOZORDER | SWP_SHOWWINDOW);
+            SetWindowPos (h.dissolveBtn, nullptr, 596, y, 80, 24, SWP_NOZORDER | SWP_SHOWWINDOW);
+            continue;
+        }
+        const int s = SlotOf (item.key);
         if (s < 0) continue;
+        shownSlots.insert (s);
         RowControls& r = g_rows[s];
-        const int y = (int) pos * kRowH - g_scroll + 2;
-        SetWindowPos (r.up, nullptr, 6, y, 24, 20, SWP_NOZORDER);
-        SetWindowPos (r.down, nullptr, 6, y + 23, 24, 20, SWP_NOZORDER);
-        SetWindowPos (r.toggle, nullptr, 36, y, 184, 42, SWP_NOZORDER);
+        const int xoff = BlockOf (item.key) >= 0 ? 16 : 0;
+        SetWindowPos (r.toggle, nullptr, 6 + xoff, y, 206, 42, SWP_NOZORDER | SWP_SHOWWINDOW);
         if (r.breath)
         {
-            SetWindowPos (r.breath, nullptr, 226, y, 128, 20, SWP_NOZORDER);
-            SetWindowPos (r.tag, nullptr, 226, y + 23, 128, 16, SWP_NOZORDER);
+            SetWindowPos (r.breath, nullptr, 226 + xoff, y, 128, 20, SWP_NOZORDER | SWP_SHOWWINDOW);
+            SetWindowPos (r.tag, nullptr, 226 + xoff, y + 23, 128, 16, SWP_NOZORDER | SWP_SHOWWINDOW);
         }
-        else SetWindowPos (r.tag, nullptr, 226, y + 12, 128, 16, SWP_NOZORDER);
+        else SetWindowPos (r.tag, nullptr, 226 + xoff, y + 12, 128, 16, SWP_NOZORDER | SWP_SHOWWINDOW);
         for (int j = 0; j < r.knobCount; ++j)
         {
-            const int x = 362 + j * 124;
-            SetWindowPos (r.knobLabel[j], nullptr, x, y, 120, 13, SWP_NOZORDER);
-            SetWindowPos (r.knobSlider[j], nullptr, x, y + 14, 120, 28, SWP_NOZORDER);
+            const int x = 362 + xoff + j * 124;
+            SetWindowPos (r.knobLabel[j], nullptr, x, y, 120, 13, SWP_NOZORDER | SWP_SHOWWINDOW);
+            SetWindowPos (r.knobSlider[j], nullptr, x, y + 14, 120, 28, SWP_NOZORDER | SWP_SHOWWINDOW);
         }
-        if (g_edit.order[pos] == g_selKey)
-            SetWindowPos (g_frame, nullptr, 2, y - 2, 730, kRowH, SWP_NOZORDER);
+        if (!g_dragging && item.key == g_selKey)
+        {
+            SetWindowPos (g_frame, nullptr, 2, y - 2, 744, kRowH, SWP_NOZORDER | SWP_SHOWWINDOW);
+            framePlaced = true;
+        }
     }
+    for (; headerPool < kMaxHeaderPool; ++headerPool)
+    {
+        ShowWindow (g_headers[headerPool].nameBtn, SW_HIDE);
+        ShowWindow (g_headers[headerPool].collapseBtn, SW_HIDE);
+        ShowWindow (g_headers[headerPool].dissolveBtn, SW_HIDE);
+        g_headers[headerPool].blockIdx = -1;
+    }
+    for (int s = 0; s < kNumSlots; ++s)
+    {
+        if (shownSlots.count (s)) continue;
+        RowControls& r = g_rows[s];
+        ShowWindow (r.toggle, SW_HIDE);
+        ShowWindow (r.tag, SW_HIDE);
+        if (r.breath) ShowWindow (r.breath, SW_HIDE);
+        for (int j = 0; j < r.knobCount; ++j)
+        {
+            ShowWindow (r.knobLabel[j], SW_HIDE);
+            ShowWindow (r.knobSlider[j], SW_HIDE);
+        }
+    }
+    if (!g_dragging && !framePlaced) ShowWindow (g_frame, SW_HIDE);
 }
 
-// Push g_edit into every row control (states, texts, slider positions).
 void RefreshChain()
 {
     for (int s = 0; s < kNumSlots; ++s)
@@ -356,6 +471,7 @@ void LoadIntoEditor (const std::wstring& name)
     g_edit = p;
     g_editIsMainCurrent = g_edit.name == g_mainCurrent;
     g_selKey = "gate";
+    g_scroll = 0;
     RefreshGroupCombo (-1);
     RefreshChain();
     wchar_t title[320];
@@ -369,7 +485,7 @@ LRESULT CALLBACK ChainPanelProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         case WM_COMMAND:
         case WM_HSCROLL:
-            return SendMessageW (g_win, msg, wp, lp); // handled by the settings proc
+            return SendMessageW (g_win, msg, wp, lp);
         case WM_VSCROLL:
         {
             RECT rc {};
@@ -397,6 +513,170 @@ LRESULT CALLBACK ChainPanelProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcW (hwnd, msg, wp, lp);
 }
 
+// --- Drag & drop reordering ---------------------------------------------------
+bool IsDraggedKey (const std::string& key)
+{
+    if (g_dragKind == 1) return key == g_dragKey;
+    if (g_dragKind == 2 && g_dragBlock >= 0 && g_dragBlock < (int) g_edit.blocks.size())
+        for (const auto& k : g_edit.blocks[(size_t) g_dragBlock].filters)
+            if (k == key) return true;
+    return false;
+}
+
+// From a content-space Y, find where the drop lands: the key that would
+// end up right after the dragged item(s), and the block the drop is
+// inside of (by name), if any.
+void ComputeInsertion (int contentY, std::string& beforeKey, std::wstring& insideBlockName)
+{
+    beforeKey.clear();
+    insideBlockName.clear();
+    size_t idx = g_items.size();
+    for (size_t i = 0; i < g_items.size(); ++i)
+        if (contentY < g_items[i].top + g_items[i].height / 2) { idx = i; break; }
+    for (size_t i = idx; i < g_items.size(); ++i)
+        if (!g_items[i].header && !IsDraggedKey (g_items[i].key)) { beforeKey = g_items[i].key; break; }
+    std::string prevKey;
+    for (long i = (long) idx - 1; i >= 0; --i)
+        if (!g_items[(size_t) i].header && !IsDraggedKey (g_items[(size_t) i].key)) { prevKey = g_items[(size_t) i].key; break; }
+    const int prevBlock = BlockOf (prevKey);
+    const int nextBlock = BlockOf (beforeKey);
+    if (!beforeKey.empty() && prevBlock >= 0 && prevBlock == nextBlock)
+        insideBlockName = g_edit.blocks[(size_t) prevBlock].name;
+    else if (idx > 0 && idx <= g_items.size() && g_items[idx - 1].header && nextBlock >= 0 &&
+             g_items[idx - 1].blockIdx == nextBlock)
+        insideBlockName = g_edit.blocks[(size_t) nextBlock].name;
+}
+
+void ShowDragIndicator (int contentY)
+{
+    size_t idx = g_items.size();
+    for (size_t i = 0; i < g_items.size(); ++i)
+        if (contentY < g_items[i].top + g_items[i].height / 2) { idx = i; break; }
+    const int top = idx < g_items.size() ? g_items[idx].top : ContentHeight();
+    SetWindowPos (g_frame, nullptr, 2, top - g_scroll, 744, 3, SWP_NOZORDER | SWP_SHOWWINDOW);
+}
+
+void ApplyDragDrop()
+{
+    std::string beforeKey;
+    std::wstring insideName;
+    ComputeInsertion (g_dragPanelY + g_scroll, beforeKey, insideName);
+
+    auto insertPos = [&] (std::vector<std::string>& ord) {
+        if (beforeKey.empty()) return ord.end();
+        return std::find (ord.begin(), ord.end(), beforeKey);
+    };
+
+    if (g_dragKind == 1)
+    {
+        const std::string key = g_dragKey;
+        // Leave the old block (drop it if it becomes empty).
+        const int oldBlock = BlockOf (key);
+        if (oldBlock >= 0)
+        {
+            auto& f = g_edit.blocks[(size_t) oldBlock].filters;
+            f.erase (std::remove (f.begin(), f.end(), key), f.end());
+            if (f.empty()) g_edit.blocks.erase (g_edit.blocks.begin() + oldBlock);
+        }
+        auto& ord = g_edit.order;
+        ord.erase (std::remove (ord.begin(), ord.end(), key), ord.end());
+        ord.insert (insertPos (ord), key);
+        // Join the block the drop landed inside of.
+        if (!insideName.empty())
+        {
+            for (auto& blk : g_edit.blocks)
+                if (blk.name == insideName)
+                {
+                    blk.filters.push_back (key);
+                    std::sort (blk.filters.begin(), blk.filters.end(),
+                               [&] (const std::string& a, const std::string& b) {
+                                   return std::find (ord.begin(), ord.end(), a) <
+                                          std::find (ord.begin(), ord.end(), b);
+                               });
+                    break;
+                }
+        }
+        g_selKey = key;
+    }
+    else if (g_dragKind == 2 && g_dragBlock >= 0 && g_dragBlock < (int) g_edit.blocks.size())
+    {
+        const std::vector<std::string> chunk = g_edit.blocks[(size_t) g_dragBlock].filters;
+        auto& ord = g_edit.order;
+        for (const auto& k : chunk)
+            ord.erase (std::remove (ord.begin(), ord.end(), k), ord.end());
+        ord.insert (insertPos (ord), chunk.begin(), chunk.end());
+    }
+    Commit();
+    RefreshChain();
+}
+
+int PanelYFromCursor (HWND hwnd)
+{
+    POINT pt {};
+    GetCursorPos (&pt);
+    ScreenToClient (g_panel, &pt);
+    (void) hwnd;
+    return pt.y;
+}
+
+LRESULT CALLBACK DragSubclassProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                   UINT_PTR idSubclass, DWORD_PTR refData)
+{
+    switch (msg)
+    {
+        case WM_LBUTTONDOWN:
+            g_dragHwnd = hwnd;
+            g_dragRef = refData;
+            g_dragging = false;
+            g_dragPanelY = PanelYFromCursor (hwnd);
+            g_dragStartPanelY = g_dragPanelY;
+            SetCapture (hwnd);
+            return DefSubclassProc (hwnd, msg, wp, lp);
+        case WM_MOUSEMOVE:
+            if (g_dragHwnd == hwnd && (wp & MK_LBUTTON))
+            {
+                g_dragPanelY = PanelYFromCursor (hwnd);
+                if (!g_dragging && std::abs (g_dragPanelY - g_dragStartPanelY) > 7)
+                {
+                    g_dragging = true;
+                    if (refData < 1000)
+                    {
+                        g_dragKind = 1;
+                        g_dragKey = kSlotKeys[refData];
+                    }
+                    else
+                    {
+                        g_dragKind = 2;
+                        const int pool = (int) refData - 1000;
+                        g_dragBlock = (pool >= 0 && pool < kMaxHeaderPool) ? g_headers[pool].blockIdx : -1;
+                    }
+                }
+                if (g_dragging) ShowDragIndicator (g_dragPanelY + g_scroll);
+            }
+            return DefSubclassProc (hwnd, msg, wp, lp);
+        case WM_LBUTTONUP:
+            if (g_dragHwnd == hwnd)
+            {
+                const bool wasDragging = g_dragging;
+                g_dragHwnd = nullptr;
+                g_dragging = false;
+                ReleaseCapture();
+                if (wasDragging)
+                {
+                    g_dragPanelY = PanelYFromCursor (hwnd);
+                    ApplyDragDrop();
+                    g_dragKind = 0;
+                    return 0; // swallow the click
+                }
+            }
+            return DefSubclassProc (hwnd, msg, wp, lp);
+        case WM_NCDESTROY:
+            RemoveWindowSubclass (hwnd, DragSubclassProc, idSubclass);
+            return DefSubclassProc (hwnd, msg, wp, lp);
+    }
+    return DefSubclassProc (hwnd, msg, wp, lp);
+}
+
 void CreateChainRows (HWND panel)
 {
     auto mk = [&] (const wchar_t* cls, const wchar_t* text, DWORD style, int id) {
@@ -410,9 +690,8 @@ void CreateChainRows (HWND panel)
     {
         RowControls& r = g_rows[s];
         const std::string key = kSlotKeys[s];
-        r.up = mk (L"BUTTON", L"↑", WS_TABSTOP, RowId (s, 0));
-        r.down = mk (L"BUTTON", L"↓", WS_TABSTOP, RowId (s, 1));
         r.toggle = mk (L"BUTTON", L"", WS_TABSTOP | BS_AUTOCHECKBOX | BS_PUSHLIKE, RowId (s, 2));
+        SetWindowSubclass (r.toggle, DragSubclassProc, 0, (DWORD_PTR) s);
         r.tag = mk (L"STATIC", L"", 0, 0);
         if (key == "gate")
             r.breath = mk (L"BUTTON", L"", WS_TABSTOP | BS_AUTOCHECKBOX | BS_PUSHLIKE, RowId (s, 3));
@@ -426,6 +705,17 @@ void CreateChainRows (HWND panel)
             SendMessageW (r.knobSlider[j], TBM_SETRANGE, TRUE, MAKELPARAM (0, 1000));
             SendMessageW (r.knobSlider[j], TBM_SETPAGESIZE, 0, 50);
         }
+    }
+    for (int i = 0; i < kMaxHeaderPool; ++i)
+    {
+        HeaderControls& h = g_headers[i];
+        h.nameBtn = mk (L"BUTTON", L"", WS_TABSTOP, HB_BASE + i * 3 + 0);
+        SetWindowSubclass (h.nameBtn, DragSubclassProc, 0, (DWORD_PTR) (1000 + i));
+        h.collapseBtn = mk (L"BUTTON", L"", WS_TABSTOP, HB_BASE + i * 3 + 1);
+        h.dissolveBtn = mk (L"BUTTON", L"解散", WS_TABSTOP, HB_BASE + i * 3 + 2);
+        ShowWindow (h.nameBtn, SW_HIDE);
+        ShowWindow (h.collapseBtn, SW_HIDE);
+        ShowWindow (h.dissolveBtn, SW_HIDE);
     }
 }
 
@@ -558,6 +848,53 @@ void OnMoveSelectedRow()
     RefreshChain();
 }
 
+void OnBlockCreate()
+{
+    if (BlockOf (g_selKey) >= 0)
+    {
+        MessageBoxW (g_win, L"選択中のフィルターはすでにブロックの中です", L"MicFilter",
+                     MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    std::wstring name;
+    if (!PromptText (g_win, L"新規ブロック（並び順用）", L"", name)) return;
+    OrderBlock blk;
+    blk.name = name;
+    blk.filters = { g_selKey };
+    g_edit.blocks.push_back (blk);
+    Commit();
+    RefreshChain();
+}
+
+void OnBlockRename (int pool)
+{
+    const int b = g_headers[pool].blockIdx;
+    if (b < 0 || b >= (int) g_edit.blocks.size()) return;
+    std::wstring name;
+    if (!PromptText (g_win, L"ブロック名の変更", g_edit.blocks[(size_t) b].name, name)) return;
+    g_edit.blocks[(size_t) b].name = name;
+    Commit();
+    LayoutRows();
+}
+
+void OnBlockCollapse (int pool)
+{
+    const int b = g_headers[pool].blockIdx;
+    if (b < 0 || b >= (int) g_edit.blocks.size()) return;
+    g_edit.blocks[(size_t) b].collapsed = !g_edit.blocks[(size_t) b].collapsed;
+    Commit();
+    LayoutRows();
+}
+
+void OnBlockDissolve (int pool)
+{
+    const int b = g_headers[pool].blockIdx;
+    if (b < 0 || b >= (int) g_edit.blocks.size()) return;
+    g_edit.blocks.erase (g_edit.blocks.begin() + b);
+    Commit();
+    RefreshChain();
+}
+
 void OnRowToggle (int slot)
 {
     const std::string key = kSlotKeys[slot];
@@ -568,20 +905,6 @@ void OnRowToggle (int slot)
     SetToggleText (g_rows[slot].toggle, on, info ? info->label : L"?");
     LayoutRows();
     Commit();
-}
-
-void OnRowMove (int slot, int delta)
-{
-    const std::string key = kSlotKeys[slot];
-    g_selKey = key;
-    int pos = -1;
-    for (size_t i = 0; i < g_edit.order.size(); ++i)
-        if (g_edit.order[i] == key) pos = (int) i;
-    const int next = pos + delta;
-    if (pos < 0 || next < 0 || next >= (int) g_edit.order.size()) return;
-    std::swap (g_edit.order[(size_t) pos], g_edit.order[(size_t) next]);
-    Commit();
-    LayoutRows();
 }
 
 void OnBreathToggle()
@@ -651,6 +974,9 @@ LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             button (L"全OFF", S_GROUP_ALL_OFF, 672, 31, 62, 25);
             button (L"選択行をこのグループへ", S_MOVE_BUTTON, 746, 31, 168, 25);
 
+            label (L"並び順ブロック（フィルターのボタン／ブロック名をドラッグで移動）", 212, 62, 500);
+            button (L"選択行からブロック作成", S_BLOCK_CREATE, 746, 60, 168, 25);
+
             static bool panelRegistered = false;
             if (!panelRegistered)
             {
@@ -665,7 +991,7 @@ LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             g_panel = CreateWindowW (L"MicFilterChainPanel", L"",
                                      WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL,
-                                     212, 66, 756, 544, hwnd, nullptr,
+                                     212, 92, 764, 518, hwnd, nullptr,
                                      GetModuleHandleW (nullptr), nullptr);
             CreateChainRows (g_panel);
 
@@ -681,12 +1007,19 @@ LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case WM_COMMAND:
         {
             const int id = LOWORD (wp);
+            if (id >= HB_BASE && id < HB_BASE + kMaxHeaderPool * 3)
+            {
+                const int pool = (id - HB_BASE) / 3;
+                const int sub = (id - HB_BASE) % 3;
+                if (sub == 0) { OnBlockRename (pool); return 0; }
+                if (sub == 1) { OnBlockCollapse (pool); return 0; }
+                if (sub == 2) { OnBlockDissolve (pool); return 0; }
+                return 0;
+            }
             if (id >= R_BASE && id < R_BASE + kNumSlots * 16)
             {
                 const int slot = (id - R_BASE) / 16;
                 const int sub = (id - R_BASE) % 16;
-                if (sub == 0) { OnRowMove (slot, -1); return 0; }
-                if (sub == 1) { OnRowMove (slot, +1); return 0; }
                 if (sub == 2) { OnRowToggle (slot); return 0; }
                 if (sub == 3) { OnBreathToggle(); return 0; }
                 return 0;
@@ -709,6 +1042,7 @@ LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 case S_GROUP_ALL_ON: OnGroupAll (true); return 0;
                 case S_GROUP_ALL_OFF: OnGroupAll (false); return 0;
                 case S_MOVE_BUTTON: OnMoveSelectedRow(); return 0;
+                case S_BLOCK_CREATE: OnBlockCreate(); return 0;
                 case S_APPLY:
                     g_mainCurrent = g_edit.name;
                     g_editIsMainCurrent = true;
@@ -720,7 +1054,6 @@ LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         case WM_HSCROLL:
         {
-            // Trackbar notification, forwarded from the chain panel.
             const int code = LOWORD (wp);
             if (code != TB_THUMBTRACK && code != TB_ENDTRACK && code != SB_LINELEFT &&
                 code != SB_LINERIGHT && code != SB_PAGELEFT && code != SB_PAGERIGHT)

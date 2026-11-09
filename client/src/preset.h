@@ -92,6 +92,18 @@ inline const KnobDef kKnobs[] = {
 inline constexpr int kNumKnobs = (int) (sizeof (kKnobs) / sizeof (kKnobs[0]));
 const KnobDef* FindKnob (const std::string& valueKey);
 
+// A named run of consecutive stages in the chain view ("block").
+// Separate concept from PresetGroup: groups organize filters, blocks
+// bundle neighbours in the application order so they move together.
+// Invariant (enforced by Normalized): members are consecutive in
+// `order`, unique across blocks, and there are at least 1 of them.
+struct OrderBlock
+{
+    std::wstring name;
+    std::vector<std::string> filters; // stage keys
+    bool collapsed = false;
+};
+
 struct Preset
 {
     std::wstring name;
@@ -99,6 +111,7 @@ struct Preset
     std::map<std::string, double> values;  // every knob valueKey (plain units)
     std::vector<PresetGroup> groups;       // a partition of all keys
     std::vector<std::string> order;        // stage keys (stage >= 0), a permutation
+    std::vector<OrderBlock> blocks;        // consecutive runs inside order
 };
 
 Preset DefaultPreset();

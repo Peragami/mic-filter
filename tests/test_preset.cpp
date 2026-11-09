@@ -81,6 +81,22 @@ int main()
     for (const auto& g : fixed.groups) grouped += g.filters.size();
     CHECK (grouped == (size_t) kNumFilterInfos);  // everything grouped
 
+    // Blocks round-trip; non-consecutive blocks are dissolved.
+    {
+        Preset bp = def;
+        bp.blocks = { { L"前半", { "declip", "declick", "duck" }, true } };
+        Preset bq;
+        CHECK (ParsePreset (SerializePreset (Normalized (bp)), bq));
+        bq = Normalized (bq);
+        CHECK (bq.blocks.size() == 1);
+        CHECK (bq.blocks[0].name == L"前半");
+        CHECK (bq.blocks[0].filters.size() == 3);
+        CHECK (bq.blocks[0].collapsed == true);
+        Preset scattered = def;
+        scattered.blocks = { { L"バラバラ", { "declip", "gate" }, false } };
+        CHECK (Normalized (scattered).blocks.empty()); // not consecutive -> dropped
+    }
+
     // Garbage is rejected by the parser.
     Preset dummy;
     CHECK (!ParsePreset ("not json at all", dummy));

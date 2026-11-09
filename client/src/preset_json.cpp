@@ -275,6 +275,37 @@ Preset Normalized (Preset p)
         if (seen.insert (key).second) order.push_back (key);
     p.order = order;
 
+    // blocks: members are rebuilt in chain order, deduped across
+    // blocks, and a block survives only if its members end up
+    // consecutive in the final order.
+    {
+        std::map<std::string, int> pos;
+        for (size_t i = 0; i < p.order.size(); ++i) pos[p.order[i]] = (int) i;
+        std::set<std::string> claimed;
+        std::vector<OrderBlock> blocks;
+        for (auto& b : p.blocks)
+        {
+            std::set<std::string> want;
+            for (const auto& key : b.filters)
+            {
+                const FilterInfo* f = FindFilter (key);
+                if (f && f->stage >= 0 && !claimed.count (key)) want.insert (key);
+            }
+            OrderBlock clean;
+            clean.name = b.name.empty() ? L"ブロック" : b.name;
+            clean.collapsed = b.collapsed;
+            for (const auto& key : p.order)
+                if (want.count (key)) clean.filters.push_back (key);
+            if (clean.filters.empty()) continue;
+            const int first = pos[clean.filters.front()];
+            const int last = pos[clean.filters.back()];
+            if (last - first != (int) clean.filters.size() - 1) continue; // not consecutive
+            for (const auto& key : clean.filters) claimed.insert (key);
+            blocks.push_back (clean);
+        }
+        p.blocks = blocks;
+    }
+
     if (p.name.empty()) p.name = L"プリセット";
     return p;
 }
@@ -356,6 +387,17 @@ std::string SerializePreset (const Preset& p)
             s += (j ? ", " : "") + std::string ("\"") + p.groups[g].filters[j] + "\"";
         s += "] }";
     }
+    s += "\n  ],\n  \"blocks\": [";
+    for (size_t g = 0; g < p.blocks.size(); ++g)
+    {
+        s += g ? ",\n    " : "\n    ";
+        s += "{ \"name\": \"" + JsonEscape (WideToUtf8 (p.blocks[g].name)) + "\", \"filters\": [";
+        for (size_t j = 0; j < p.blocks[g].filters.size(); ++j)
+            s += (j ? ", " : "") + std::string ("\"") + p.blocks[g].filters[j] + "\"";
+        s += "], \"collapsed\": ";
+        s += p.blocks[g].collapsed ? "true" : "false";
+        s += " }";
+    }
     s += "\n  ],\n  \"order\": [";
     for (size_t i = 0; i < p.order.size(); ++i)
         s += (i ? ", " : "") + std::string ("\"") + p.order[i] + "\"";
@@ -405,6 +447,46 @@ bool ParsePreset (const std::string& json, Preset& out)
             if (FindValueRegion (obj, "filters", '[', ']', fb, fe))
                 g.filters = CollectStrings (obj, fb, fe);
             out.groups.push_back (g);
+            i = oe;
+        }
+    }
+
+    if (FindValueRegion (json, "blocks", '[', ']', b, e))
+    {
+        size_t i = b;
+        while (i < e)
+        {
+            const size_t ob = json.find ('{', i);
+            if (ob == std::string::npos || ob >= e) break;
+            int depth = 0; bool inStr = false, esc = false; size_t oe = e;
+            for (size_t j = ob; j < e; ++j)
+            {
+                const char c = json[j];
+                if (inStr) { if (esc) esc = false; else if (c == '\\') esc = true; else if (c == '"') inStr = false; continue; }
+                if (c == '"') inStr = true;
+                else if (c == '{') ++depth;
+                else if (c == '}' && --depth == 0) { oe = j + 1; break; }
+            }
+            const std::string obj = json.substr (ob, oe - ob);
+            OrderBlock blk;
+            std::string bname;
+            if (updatecheck::jsonStringField (obj, "name", bname))
+                blk.name = Utf8ToWideLocal (JsonUnescape (bname));
+            size_t fb = 0, fe = 0;
+            if (FindValueRegion (obj, "filters", '[', ']', fb, fe))
+                blk.filters = CollectStrings (obj, fb, fe);
+            const size_t cp = obj.find ("\"collapsed\"");
+            if (cp != std::string::npos)
+            {
+                const size_t colon = obj.find (':', cp);
+                if (colon != std::string::npos)
+                {
+                    size_t v = colon + 1;
+                    while (v < obj.size() && (obj[v] == ' ' || obj[v] == '\t')) ++v;
+                    blk.collapsed = obj.compare (v, 4, "true") == 0;
+                }
+            }
+            out.blocks.push_back (blk);
             i = oe;
         }
     }
