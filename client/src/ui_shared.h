@@ -1,6 +1,6 @@
 #pragma once
 // ui_shared.h -- control ids, tiny window helpers and the globals shared
-// between main.cpp, mic_level.cpp and calibration.cpp (single-window app,
+// between main.cpp, mic_level.cpp and passive_calibration.cpp (single-window app,
 // so these are plain globals by design).
 
 #include <windows.h>
@@ -19,7 +19,7 @@ constexpr int IDC_METER = 1007;
 constexpr int IDC_STATUS = 1008;
 constexpr int IDC_MIC_LEVEL = 1009;
 constexpr int IDC_MIC_LEVEL_VALUE = 1010;
-constexpr int IDC_CALIB_BUTTON = 1011;
+constexpr int IDC_AUTO_GAIN_CHECK = 1011;
 constexpr int IDC_DRY_CHECK = 1012;
 constexpr int IDC_FILTER_BASE = 1020; // + index into the filter table in main.cpp
 

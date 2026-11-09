@@ -1,8 +1,8 @@
 // MicFilter dedicated client -- tiny Win32 GUI around WasapiEngine.
 // No framework: plain Win32 controls, WASAPI does the audio, the DSP
 // chain is embedded in the engine (v0.7+). Mic level lives in
-// mic_level.cpp, auto calibration in calibration.cpp, shared UI bits in
-// ui_shared.h. See README.md for usage.
+// mic_level.cpp, passive auto calibration in passive_calibration.cpp,
+// shared UI bits in ui_shared.h. See README.md for usage.
 
 #include <windows.h>
 #include <commctrl.h>
@@ -17,7 +17,7 @@
 #include <string>
 #include <vector>
 
-#include "calibration.h"
+#include "passive_calibration.h"
 #include "log.h"
 #include "mic_level.h"
 #include "ui_shared.h"
@@ -190,6 +190,7 @@ bool DoStart (HWND hwnd)
     miclog::Write ("app: started (mode=%d block=%d)", (int) g_engine.ActiveMode(),
                    g_engine.ActiveBlockFrames());
     if (IsChecked (hwnd, IDC_DRY_CHECK)) g_engine.SetBypass (true);
+    PassiveCalOnStart (hwnd);
     g_running = true;
     SetWindowTextW (Ctl (hwnd, IDC_START_BUTTON), L"停止");
     SetControlsEnabled (hwnd, false);
@@ -199,7 +200,6 @@ bool DoStart (HWND hwnd)
 
 void DoStop (HWND hwnd)
 {
-    CalibrationOnEngineStopped (hwnd);
     miclog::Write ("app: stopping (xruns=%llu)", g_engine.XrunCount());
     g_engine.Stop();
     g_running = false;
@@ -230,7 +230,7 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             SendMessageW (buf, CB_SETCURSEL, 1, 0); // 64 = default (ClientConfig)
             AddLabel (hwnd, L"音質モード：低遅延（AIなし）", 176, 162, 300);
 
-            AddLabel (hwnd, L"Windows マイクレベル（目安：まず50、一番大きな声でピーク -12〜-6dB）",
+            AddLabel (hwnd, L"Windows マイクレベル（目安50／最大声でピーク -12〜-6dB）",
                       16, 192, 470);
             HWND level = make (CreateWindowW (TRACKBAR_CLASSW, L"",
                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_AUTOTICKS,
@@ -249,10 +249,12 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                  16, 252, 120, 32, hwnd,
                                  reinterpret_cast<HMENU> ((INT_PTR) IDC_START_BUTTON),
                                  nullptr, nullptr));
-            make (CreateWindowW (L"BUTTON", L"自動較正", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                 146, 252, 104, 32, hwnd,
-                                 reinterpret_cast<HMENU> ((INT_PTR) IDC_CALIB_BUTTON),
-                                 nullptr, nullptr));
+            HWND agc = make (CreateWindowW (L"BUTTON", L"自動補正",
+                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                            146, 257, 110, 24, hwnd,
+                                            reinterpret_cast<HMENU> ((INT_PTR) IDC_AUTO_GAIN_CHECK),
+                                            nullptr, nullptr));
+            SendMessageW (agc, BM_SETCHECK, BST_CHECKED, 0); // passive calibration on by default
             HWND meter = CreateWindowW (PROGRESS_CLASSW, L"",
                                         WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
                                         262, 258, 224, 20, hwnd,
@@ -325,16 +327,16 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 else DoStart (hwnd);
                 return 0;
             }
-            if (LOWORD (wp) == IDC_CALIB_BUTTON)
+            if (LOWORD (wp) == IDC_AUTO_GAIN_CHECK)
             {
-                if (CalibrationActive()) CalibCancel (hwnd);
-                else CalibStart (hwnd);
+                miclog::Write ("app: passive auto calibration = %d",
+                               IsChecked (hwnd, IDC_AUTO_GAIN_CHECK) ? 1 : 0);
                 return 0;
             }
             if (LOWORD (wp) == IDC_DRY_CHECK)
             {
                 const bool dry = IsChecked (hwnd, IDC_DRY_CHECK);
-                if (!CalibrationActive()) g_engine.SetBypass (dry);
+                g_engine.SetBypass (dry);
                 miclog::Write ("app: dry(bypass) = %d", dry ? 1 : 0);
                 return 0;
             }
@@ -352,7 +354,7 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             {
                 if (g_running)
                 {
-                    CalibrationOnTimerTick (hwnd);
+                    const std::wstring notice = PassiveCalOnTimerTick (hwnd);
                     // Auto buffer step-up requested by the engine (XRUNs).
                     const int requested = g_engine.RequestedBufferFrames();
                     if (requested > 0 && requested != SelectedBlockFrames (hwnd))
@@ -367,7 +369,7 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     g_meterDisplay = std::max (peak, g_meterDisplay * 0.90f);
                     SendMessageW (Ctl (hwnd, IDC_METER), PBM_SETPOS,
                                   (WPARAM) (g_meterDisplay * 1000.0f), 0);
-                    UpdateStatus (hwnd);
+                    UpdateStatus (hwnd, notice);
                 }
                 return 0;
             }
