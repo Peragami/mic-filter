@@ -14,7 +14,8 @@
 #include <mutex>
 
 #include "log.h"
-#include "vst3_host.h"
+#include "Source/ParamBridge.h" // MicFilterBridge (shared with the VST3 build)
+#include "vst3/source/paramids.h"
 
 namespace {
 
@@ -588,7 +589,6 @@ bool WasapiEngine::Start (const EngineConfig& cfg, std::wstring& errorOut)
                     cfg.inputDeviceId.empty() ? L"(default)" : cfg.inputDeviceId.c_str(),
                     cfg.outputDeviceId.empty() ? L"(default)" : cfg.outputDeviceId.c_str(),
                     cfg.blockFrames);
-    miclog::WriteW (L"engine: plugin path = %s", cfg.pluginPath.c_str());
     if (worker_.joinable())
     {
         errorOut = L"既に動作しています";
@@ -655,21 +655,30 @@ void WasapiEngine::WorkerMain (EngineConfig cfg)
         if (initDone_) SetEvent (initDone_);
     };
 
-    // 1) Load the plugin first: no point opening devices without it.
-    Vst3Host host;
-    {
-        std::wstring perr;
-        if (host.Load (cfg.pluginPath, (double) kSampleRate, cfg.blockFrames, perr))
-            for (const auto& [id, v] : cfg.initialParams)
-                host.SetParameter (id, v);
-        else
+    // 1) Embedded DSP chain (v0.7: no .vst3 hosting in the client).
+    pure2::ChainV2 chain;
+    chain.prepare ((double) kSampleRate);
+    double values[32];
+    MicFilterBridge::fillDefaults (values);
+    for (const auto& [id, v] : cfg.initialParams)
+        if (id < (unsigned int) MicFilterParams::kNumParams)
+            values[id] = MicFilterParams::toPlain ((int) id, (float) v);
+    chain.setParams (MicFilterBridge::paramsFromPlainValues (values));
+    latencySamples_.store (chain.latencySamples());
+    miclog::Write ("engine: embedded DSP ready, latency=%d samples", chain.latencySamples());
+    auto applyPendingParams = [&] {
+        std::vector<std::pair<unsigned int, double>> pending;
         {
-            miclog::WriteW (L"engine: plugin load failed: %s", perr.c_str());
-            reportInit (false, L"VST3 の読み込みに失敗: " + perr);
-            if (didInit) CoUninitialize();
-            return;
+            std::lock_guard<std::mutex> lock (paramMutex_);
+            pending.swap (paramQueue_);
         }
-    }
+        if (pending.empty()) return;
+        for (const auto& [id, v] : pending)
+            if (id < (unsigned int) MicFilterParams::kNumParams)
+                values[id] = MicFilterParams::toPlain ((int) id, (float) v);
+        chain.setParams (MicFilterBridge::paramsFromPlainValues (values));
+        latencySamples_.store (chain.latencySamples());
+    };
 
     // 2) Devices, in the priority order from ClientConfig.
     WasapiSession session;
@@ -694,7 +703,6 @@ void WasapiEngine::WorkerMain (EngineConfig cfg)
     {
         miclog::WriteW (L"engine: all modes failed, last error: %s", lastErr.c_str());
         reportInit (false, L"音声デバイスの初期化に失敗（全モード）: " + lastErr);
-        host.Unload();
         if (didInit) CoUninitialize();
         return;
     }
@@ -737,16 +745,8 @@ void WasapiEngine::WorkerMain (EngineConfig cfg)
         WaitForMultipleObjects (3, handles, FALSE, 50);
         if (stopRequested_) break;
 
-        // --- forward queued GUI parameter changes to the plugin host.
-        {
-            std::vector<std::pair<unsigned int, double>> pending;
-            {
-                std::lock_guard<std::mutex> lock (paramMutex_);
-                pending.swap (paramQueue_);
-            }
-            for (const auto& [id, v] : pending)
-                host.SetParameter (id, v);
-        }
+        // --- apply queued GUI parameter changes to the embedded chain.
+        applyPendingParams();
 
         // --- capture: drain all pending packets into the assembly buffer,
         //     completing one chunk at a time into the single slot.
@@ -814,21 +814,22 @@ void WasapiEngine::WorkerMain (EngineConfig cfg)
                     const int align = session.renFormat->nBlockAlign;
                     if (slotFull)
                     {
-                        // Run the plugin in slices of the user-selected block
-                        // size, exactly as a DAW host would.
+                        // Process in slices of the user-selected block size.
                         float peak = 0.0f;
                         for (int off = 0; off < slotFrames; off += block)
                         {
                             const int n = std::min (block, slotFrames - off);
-                            const float* inPtrs[2] = { slotBuf[0] + off, slotBuf[1] + off };
-                            float* outPtrs[2] = { procBuf[0] + off, procBuf[1] + off };
                             if (bypass_.load())
-                            {   // calibration: dry pass-through, no plugin
+                            {   // calibration: dry pass-through, no DSP
                                 std::memcpy (procBuf[0] + off, slotBuf[0] + off, sizeof (float) * n);
                                 std::memcpy (procBuf[1] + off, slotBuf[1] + off, sizeof (float) * n);
                             }
                             else
-                                host.Process (inPtrs, outPtrs, n);
+                            {   // Same behaviour as the VST3 build: process ch0, mirror to ch1.
+                                std::memcpy (procBuf[0] + off, slotBuf[0] + off, sizeof (float) * n);
+                                chain.processBlock (procBuf[0] + off, n);
+                                std::memcpy (procBuf[1] + off, procBuf[0] + off, sizeof (float) * n);
+                            }
                         }
                         for (int i = 0; i < slotFrames; ++i)
                         {
@@ -878,7 +879,6 @@ void WasapiEngine::WorkerMain (EngineConfig cfg)
     session.capClient->Stop();
     session.renClient->Stop();
     session.Cleanup();
-    host.Unload();
     if (avrt) AvRevertMmThreadCharacteristics (avrt);
     running_ = false;
     if (didInit) CoUninitialize();

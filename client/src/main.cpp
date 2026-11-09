@@ -391,8 +391,7 @@ const wchar_t* ModeName (ClientConfig::Mode m)
 
 void SetControlsEnabled (HWND hwnd, bool enabled)
 {
-    const int ids[] = { IDC_INPUT_COMBO, IDC_OUTPUT_COMBO, IDC_BUFFER_COMBO,
-                        IDC_PLUGIN_EDIT, IDC_BROWSE_BUTTON };
+    const int ids[] = { IDC_INPUT_COMBO, IDC_OUTPUT_COMBO, IDC_BUFFER_COMBO };
     for (int id : ids) EnableWindow (Ctl (hwnd, id), enabled);
 }
 
@@ -424,15 +423,6 @@ bool DoStart (HWND hwnd)
     for (int i = 0; i < kNumFilters; ++i)
         cfg.initialParams.push_back ({ (unsigned int) kFilterDefs[i].paramId,
                                        IsChecked (hwnd, IDC_FILTER_BASE + i) ? 1.0 : 0.0 });
-    wchar_t path[MAX_PATH] = {};
-    GetWindowTextW (Ctl (hwnd, IDC_PLUGIN_EDIT), path, MAX_PATH);
-    cfg.pluginPath = path;
-    if (cfg.pluginPath.empty())
-    {
-        MessageBoxW (hwnd, L"プラグイン（.vst3）のパスを指定してください", L"MicFilter",
-                     MB_OK | MB_ICONWARNING);
-        return false;
-    }
     std::wstring err;
     if (!g_engine.Start (cfg, err))
     {
@@ -465,24 +455,6 @@ void DoStop (HWND hwnd)
     SendMessageW (Ctl (hwnd, IDC_METER), PBM_SETPOS, 0, 0);
     g_meterDisplay = 0.0f;
     UpdateStatus (hwnd);
-}
-
-std::wstring DefaultPluginPath()
-{
-    wchar_t exePath[MAX_PATH] = {};
-    GetModuleFileNameW (nullptr, exePath, MAX_PATH);
-    std::wstring dir = exePath;
-    const size_t slash = dir.find_last_of (L"\\/");
-    if (slash != std::wstring::npos) dir = dir.substr (0, slash);
-    const std::wstring candidates[] = {
-        dir + L"\\MicFilter.vst3",
-        dir + L"\\..\\vst3\\MicFilter.vst3",
-        dir + L"\\..\\..\\vst3\\MicFilter.vst3",
-        dir + L"\\..\\..\\vst3\\build\\VST3\\Release\\MicFilter.vst3", // dev layout of the vst3/ workstream
-    };
-    for (const auto& c : candidates)
-        if (GetFileAttributesW (c.c_str()) != INVALID_FILE_ATTRIBUTES) return c;
-    return candidates[0];
 }
 
 LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -520,41 +492,30 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                  reinterpret_cast<HMENU> ((INT_PTR) IDC_MIC_LEVEL_VALUE),
                                  nullptr, nullptr));
 
-            AddLabel (hwnd, L"プラグイン（MicFilter.vst3）", 16, 252, 300);
-            HWND edit = make (CreateWindowW (L"EDIT", DefaultPluginPath().c_str(),
-                                             WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                                             16, 274, 380, 24, hwnd,
-                                             reinterpret_cast<HMENU> ((INT_PTR) IDC_PLUGIN_EDIT),
-                                             nullptr, nullptr));
-            (void) edit;
-            make (CreateWindowW (L"BUTTON", L"参照…", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                 406, 274, 80, 24, hwnd,
-                                 reinterpret_cast<HMENU> ((INT_PTR) IDC_BROWSE_BUTTON),
-                                 nullptr, nullptr));
             make (CreateWindowW (L"BUTTON", L"開始", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                                 16, 314, 120, 32, hwnd,
+                                 16, 252, 120, 32, hwnd,
                                  reinterpret_cast<HMENU> ((INT_PTR) IDC_START_BUTTON),
                                  nullptr, nullptr));
             make (CreateWindowW (L"BUTTON", L"自動較正", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                 146, 314, 104, 32, hwnd,
+                                 146, 252, 104, 32, hwnd,
                                  reinterpret_cast<HMENU> ((INT_PTR) IDC_CALIB_BUTTON),
                                  nullptr, nullptr));
             HWND meter = CreateWindowW (PROGRESS_CLASSW, L"",
                                         WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
-                                        262, 320, 224, 20, hwnd,
+                                        262, 258, 224, 20, hwnd,
                                         reinterpret_cast<HMENU> ((INT_PTR) IDC_METER),
                                         nullptr, nullptr);
             SendMessageW (meter, PBM_SETRANGE, 0, MAKELPARAM (0, 1000));
             make (CreateWindowW (L"STATIC", L"停止中", WS_CHILD | WS_VISIBLE,
-                                 16, 356, 470, 40, hwnd,
+                                 16, 294, 470, 40, hwnd,
                                  reinterpret_cast<HMENU> ((INT_PTR) IDC_STATUS),
                                  nullptr, nullptr));
 
-            AddLabel (hwnd, L"フィルター（動作中に切り替えOK、そのまま音で比べられます）", 16, 404, 470);
+            AddLabel (hwnd, L"フィルター（動作中に切り替えOK、そのまま音で比べられます）", 16, 342, 470);
             {
                 HWND dry = make (CreateWindowW (L"BUTTON", L"ドライ（全フィルターOFFの音を聞く）",
                                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                                                16, 428, 470, 22, hwnd,
+                                                16, 366, 470, 22, hwnd,
                                                 reinterpret_cast<HMENU> ((INT_PTR) IDC_DRY_CHECK),
                                                 nullptr, nullptr));
                 (void) dry;
@@ -564,7 +525,7 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 const int col = i % 2, row = i / 2;
                 HWND cb = make (CreateWindowW (L"BUTTON", kFilterDefs[i].label,
                                                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                                               16 + col * 245, 458 + row * 24, 240, 22, hwnd,
+                                               16 + col * 245, 396 + row * 24, 240, 22, hwnd,
                                                reinterpret_cast<HMENU> ((INT_PTR) (IDC_FILTER_BASE + i)),
                                                nullptr, nullptr));
                 SendMessageW (cb, BM_SETCHECK, kFilterDefs[i].defOn ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -630,21 +591,6 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 const bool on = IsChecked (hwnd, IDC_FILTER_BASE + i);
                 g_engine.SetParameter ((unsigned int) kFilterDefs[i].paramId, on ? 1.0 : 0.0);
                 miclog::Write ("app: filter param %d -> %d", kFilterDefs[i].paramId, on ? 1 : 0);
-                return 0;
-            }
-            if (LOWORD (wp) == IDC_BROWSE_BUTTON)
-            {
-                wchar_t file[MAX_PATH] = {};
-                GetWindowTextW (Ctl (hwnd, IDC_PLUGIN_EDIT), file, MAX_PATH);
-                OPENFILENAMEW ofn {};
-                ofn.lStructSize = sizeof (ofn);
-                ofn.hwndOwner = hwnd;
-                ofn.lpstrFilter = L"VST3 プラグイン (*.vst3)\0*.vst3\0すべてのファイル (*.*)\0*.*\0";
-                ofn.lpstrFile = file;
-                ofn.nMaxFile = MAX_PATH;
-                ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-                if (GetOpenFileNameW (&ofn))
-                    SetWindowTextW (Ctl (hwnd, IDC_PLUGIN_EDIT), file);
                 return 0;
             }
             break;
@@ -718,7 +664,7 @@ int APIENTRY wWinMain (HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow)
 
     HWND hwnd = CreateWindowW (wc.lpszClassName, L"MicFilter クライアント",
                                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                               CW_USEDEFAULT, CW_USEDEFAULT, 540, 750,
+                               CW_USEDEFAULT, CW_USEDEFAULT, 540, 640,
                                nullptr, nullptr, hInst, nullptr);
     if (!hwnd) return 1;
     ShowWindow (hwnd, nShow);

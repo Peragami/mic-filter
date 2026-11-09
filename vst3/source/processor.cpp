@@ -1,5 +1,6 @@
 #include "processor.h"
 #include "paramids.h"
+#include "Source/ParamBridge.h"
 
 #include "base/source/fstreamer.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
@@ -9,10 +10,6 @@
 using namespace Steinberg;
 
 namespace MicFilter {
-namespace {
-float plainOf (const double* v, int id) { return (float) v[id]; }
-bool onOf (const double* v, int id) { return v[id] > 0.5; }
-} // namespace
 
 Processor::Processor ()
 {
@@ -60,40 +57,7 @@ tresult PLUGIN_API Processor::setupProcessing (Vst::ProcessSetup& setup)
 
 void Processor::syncChainParams ()
 {
-    pure2::Params2 p;
-    p.base.inputGainDb = plainOf (values_, MicFilterParams::kInGain);
-    p.base.outputGainDb = plainOf (values_, MicFilterParams::kOutGain);
-    p.base.hpfOn = onOf (values_, MicFilterParams::kHpfOn);
-    p.base.hpfFreq = plainOf (values_, MicFilterParams::kHpfFreq);
-    p.base.gateOn = onOf (values_, MicFilterParams::kGateOn);
-    p.base.gateThreshDb = plainOf (values_, MicFilterParams::kGateThresh);
-    p.base.eqOn = onOf (values_, MicFilterParams::kEqOn);
-    p.base.eqLowDb = plainOf (values_, MicFilterParams::kEqLow);
-    p.base.eqMidDb = plainOf (values_, MicFilterParams::kEqMid);
-    p.base.eqHighDb = plainOf (values_, MicFilterParams::kEqHigh);
-    p.base.compOn = onOf (values_, MicFilterParams::kCompOn);
-    p.base.compThreshDb = plainOf (values_, MicFilterParams::kCompThresh);
-    p.base.compRatio = plainOf (values_, MicFilterParams::kCompRatio);
-    p.base.limiterOn = onOf (values_, MicFilterParams::kLimiterOn);
-    // v2 effects
-    p.hum.on = onOf (values_, MicFilterParams::kHumOn);
-    p.hum.baseHz = plainOf (values_, MicFilterParams::kHumBase) >= 55.0f ? 60.0f : 50.0f;
-    p.declip.on = onOf (values_, MicFilterParams::kDeclipOn);
-    p.declick.on = onOf (values_, MicFilterParams::kDeclickOn);
-    p.declick.thresh = plainOf (values_, MicFilterParams::kDeclickThresh);
-    p.multiband.on = onOf (values_, MicFilterParams::kMultibandOn);
-    p.deesser.on = onOf (values_, MicFilterParams::kDeesserOn);
-    p.deesser.threshDb = plainOf (values_, MicFilterParams::kDeesserThresh);
-    p.exciter.on = onOf (values_, MicFilterParams::kExciterOn);
-    p.exciter.mix = plainOf (values_, MicFilterParams::kExciterMix);
-    p.spectral.on = onOf (values_, MicFilterParams::kSpectralOn);
-    p.spectral.strength = plainOf (values_, MicFilterParams::kSpectralStrength);
-    p.duck.on = onOf (values_, MicFilterParams::kDuckOn);
-    p.breath.on = onOf (values_, MicFilterParams::kBreathOn);
-    p.rnnoise.on = onOf (values_, MicFilterParams::kRnnoiseOn);
-    p.bwe.on = onOf (values_, MicFilterParams::kBweOn);
-    p.bwe.amount = plainOf (values_, MicFilterParams::kBweAmount);
-    chain_.setParams (p);
+    chain_.setParams (MicFilterBridge::paramsFromPlainValues (values_));
     paramsDirty_ = false;
 }
 
@@ -160,7 +124,7 @@ tresult PLUGIN_API Processor::process (Vst::ProcessData& data)
     if (outBuf != inBuf)
         std::memcpy (outBuf, inBuf, sizeof (float) * (size_t) n);
 
-    const bool bypass = onOf (values_, MicFilterParams::kBypass);
+    const bool bypass = MicFilterBridge::onOf (values_, MicFilterParams::kBypass);
     if (! bypass)
     {
         if (paramsDirty_)

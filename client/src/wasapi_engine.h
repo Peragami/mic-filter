@@ -1,5 +1,7 @@
 #pragma once
-// WASAPI engine: capture device -> single-block ring -> VST3 host -> render device.
+// WASAPI engine: capture device -> single-block ring -> embedded ChainV2
+// DSP (the same code the VST3 build wraps; see Source/ParamBridge.h) ->
+// render device. Since v0.7 the client no longer hosts the .vst3 file.
 //
 // Design points (from docs/latency.md and Source/ClientConfig.h):
 //  - Event-driven only (AUDCLNT_STREAMFLAGS_EVENTCALLBACK), never polling.
@@ -42,9 +44,8 @@ struct EngineConfig
 {
     std::wstring inputDeviceId;   // empty = default capture device
     std::wstring outputDeviceId;  // empty = default render device
-    std::wstring pluginPath;      // .vst3 bundle folder or binary
     int blockFrames = ClientConfig::preferredBufferSamples; // 32/64/128/256
-    // Plugin parameters (VST id -> normalized) applied right after load.
+    // DSP parameters (MicFilterParams id -> normalized) applied at start.
     std::vector<std::pair<unsigned int, double>> initialParams;
 };
 
@@ -60,10 +61,12 @@ public:
     void Stop();
     bool IsRunning() const { return running_.load(); }
 
-    // Queue a plugin parameter change (VST id -> normalized 0..1). Safe to
-    // call from the GUI thread at any time; the worker forwards it to the
-    // host, which injects it at the next audio block.
+    // Queue a DSP parameter change (MicFilterParams id -> normalized 0..1).
+    // Safe to call from the GUI thread at any time; the worker applies it
+    // to the embedded chain at the next audio block.
     void SetParameter (unsigned int id, double normalized);
+    // DSP chain latency in samples at 48 kHz (0 until started).
+    int LatencySamples() const { return latencySamples_.load(); }
 
     float PeakLevel() const { return peak_.load(); }        // 0..1, decays in the GUI
     // --- Calibration support (docs/gain-staging.md) -------------------------
@@ -99,6 +102,7 @@ private:
     std::atomic<bool> bypass_ { false };
     std::atomic<unsigned long long> xruns_ { 0 };
     std::atomic<int> requestedBuffer_ { 0 };
+    std::atomic<int> latencySamples_ { 0 };
     ClientConfig::Mode activeMode_ = ClientConfig::Mode::WasapiShared;
     int activeBlockFrames_ = 0;
 
