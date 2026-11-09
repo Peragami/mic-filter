@@ -1,6 +1,6 @@
 {
-  "version": "0.19.0",
-  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.19.0.zip",
-  "sha256": "527651e5edead610406ace993432bc8e5c42da652f54ad7170640c1ccc0998a8",
-  "notes": "標準とAIプリセットを変更不可に。新規プリセットは標準と同じ設定から作成"
+  "version": "0.20.0",
+  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.20.0.zip",
+  "sha256": "c1f0f02146d17c25968c77d7265a9f77636b56d279ec15a98c1a24269e311e0f",
+  "notes": "設定画面をDAW式ボードUIに刷新（モジュールカード＋ロータリーノブ＋信号フロー配置）"
 }

@@ -1,10 +1,15 @@
 // settings_window.cpp -- see settings_window.h.
-// One unified chain view. Rows are the DSP stages in application
-// order; each row carries its on/off toggle and its knobs (sliders
-// for the filter's value parameters). Rows are reordered by dragging;
-// consecutive rows can be bundled into named order blocks. Everything
-// autosaves. (Filter groups were removed in v0.18.)
+// v0.20: DAW-style board. Module cards sit in signal-flow order
+// (left to right, wrapping); each card has a power LED, rotary knobs
+// (drag / wheel / double-click to reset), and can be dragged to
+// reorder. Consecutive cards can be bundled into order blocks, drawn
+// as backplates. Everything autosaves.
+// GDI+ needs the full Windows headers (PROPID & friends), so drop
+// WIN32_LEAN_AND_MEAN for this file only.
+#undef WIN32_LEAN_AND_MEAN
 #include "settings_window.h"
+
+#include <gdiplus.h>
 
 #include <algorithm>
 #include <cmath>
@@ -21,89 +26,26 @@
 namespace
 {
 // Top-level control ids (settings window).
-constexpr int S_PRESET_LIST = 2001;
+constexpr int S_PRESET_COMBO = 2001;
 constexpr int S_PRESET_NEW = 2002;
 constexpr int S_PRESET_RENAME = 2003;
+constexpr int S_LOCK_LABEL = 2019;
 constexpr int S_PRESET_DELETE = 2004;
 constexpr int S_BLOCK_CREATE = 2012;
 constexpr int S_APPLY = 2017;
 constexpr int S_CLOSE = 2018;
-// Block header pool ids: HB_BASE + pool * 3 + {0 name, 1 collapse, 2 dissolve}
-constexpr int HB_BASE = 4400;
-constexpr int kMaxHeaderPool = 8;
-
-// Row control ids: R_BASE + slot * 16 + sub
-// sub: 2 = toggle (also the drag handle), 3 = breath (gate only), 4+j = knob slider j
-constexpr int R_BASE = 4000;
-constexpr int kRowH = 46;
-constexpr int kNumSlots = 15;
-// Stage slots in registry order (the 15 reorderable filters).
-const char* kSlotKeys[kNumSlots] = {
-    "hum", "multiband", "spectral", "rnnoise", "hpf", "eq", "deesser",
-    "exciter", "bwe", "gate", "comp", "limiter", "duck", "declick", "declip"
-};
-
-struct RowControls
-{
-    HWND toggle = nullptr;
-    HWND breath = nullptr;              // gate row only
-    HWND knobLabel[3] = {};
-    HWND knobSlider[3] = {};
-    int knobCount = 0;
-    const KnobDef* knobs[3] = {};
-};
-
 HWND g_win = nullptr;
 HWND g_parent = nullptr;
-HWND g_panel = nullptr;
-HWND g_frame = nullptr;
-RowControls g_rows[kNumSlots];
-
-// Block header pool (blocks are dynamic, headers are reused controls).
-struct HeaderControls
-{
-    HWND nameBtn = nullptr, collapseBtn = nullptr, dissolveBtn = nullptr;
-    int blockIdx = -1;
-};
-HeaderControls g_headers[kMaxHeaderPool];
-
-// Display items of the chain view: block headers + visible rows.
-struct DisplayItem
-{
-    bool header = false;
-    int blockIdx = -1;   // when header
-    std::string key;     // when row
-    int top = 0, height = 0;
-};
-std::vector<DisplayItem> g_items;
-
-// Drag state (rows and block headers are dragged by their buttons).
-HWND g_dragHwnd = nullptr;
-DWORD_PTR g_dragRef = 0;
-bool g_dragging = false;
-int g_dragStartPanelY = 0;
-int g_dragPanelY = 0;
-int g_dragKind = 0; // 1 = row, 2 = block
-std::string g_dragKey;
-int g_dragBlock = -1;
+HWND g_board = nullptr;
 std::wstring g_mainCurrent;
 Preset g_edit;
 bool g_editIsMainCurrent = false;
 bool g_editLocked = false; // protected built-in preset (標準 / AIプリセット)
-std::string g_selKey = "gate"; // selected row (for group moves)
-int g_scroll = 0;
+std::string g_selKey = "gate"; // selected card (for block creation)
+int g_boardScroll = 0;
 HFONT g_font = nullptr;
 
 HWND SCtl (int id) { return GetDlgItem (g_win, id); }
-
-int SlotOf (const std::string& key)
-{
-    for (int s = 0; s < kNumSlots; ++s)
-        if (key == kSlotKeys[s]) return s;
-    return -1;
-}
-
-int RowId (int slot, int sub) { return R_BASE + slot * 16 + sub; }
 
 void Commit()
 {
@@ -118,12 +60,6 @@ void NotifyMainSelect (const std::wstring& name)
     if (g_parent)
         PostMessageW (g_parent, WM_PRESET_CHANGED, 0,
                       reinterpret_cast<LPARAM> (new std::wstring (name)));
-}
-
-void SetToggleText (HWND button, bool on, const wchar_t* label)
-{
-    const std::wstring text = std::wstring (on ? L"● " : L"○ ") + label;
-    SetWindowTextW (button, text.c_str());
 }
 
 std::wstring KnobValueText (const KnobDef& def, double v)
@@ -253,6 +189,50 @@ bool PromptText (HWND parent, const wchar_t* title, const std::wstring& initial,
 } // namespace
 namespace
 {
+// =====================================================================
+// DAW-style board: module cards in signal-flow order (left to right,
+// wrapping), rotary knobs, power LEDs, drag to reorder, blocks drawn
+// as backplates. Everything is custom-drawn in one child window.
+// =====================================================================
+constexpr int kCardH = 140;
+constexpr int kKnobR = 16;
+constexpr int kChipW = 176;
+constexpr int kChipH = 54;
+
+struct KnobGeom
+{
+    const KnobDef* def = nullptr;
+    POINT center { 0, 0 };
+};
+struct CardGeom
+{
+    std::string key;
+    RECT rc {};
+    int orderPos = 0;
+    std::vector<KnobGeom> knobs;
+    RECT breathRc {};
+    bool hasBreath = false;
+};
+struct ChipGeom
+{
+    int blockIdx = -1;
+    RECT rc {};
+    RECT unfoldRc {};
+};
+struct PlateGeom
+{
+    int blockIdx = -1;
+    RECT rc {};       // backplate segment around member cards of one row
+    RECT tabRc {};    // top band (drag / double-click to rename)
+    RECT foldRc {};   // first segment only
+    RECT dissolveRc {}; // first segment only
+    bool first = false;
+};
+std::vector<CardGeom> g_cards;
+std::vector<ChipGeom> g_chips;
+std::vector<PlateGeom> g_plates;
+int g_contentH = 0;
+
 int BlockOf (const std::string& key)
 {
     for (size_t b = 0; b < g_edit.blocks.size(); ++b)
@@ -261,10 +241,41 @@ int BlockOf (const std::string& key)
     return -1;
 }
 
-void BuildItems()
+int KnobCountOf (const std::string& key)
 {
-    g_items.clear();
+    int n = 0;
+    for (int i = 0; i < kNumKnobs; ++i)
+        if (kKnobs[i].filterKey == key) ++n;
+    return n;
+}
+
+int CardWidthOf (const std::string& key)
+{
+    return std::max (110, 26 + KnobCountOf (key) * 48);
+}
+
+struct FlowUnit
+{
+    bool chip = false;
+    int blockIdx = -1;
+    std::string key;
+    int width = 0;
+};
+
+void LayoutBoard()
+{
+    g_cards.clear();
+    g_chips.clear();
+    g_plates.clear();
+    RECT client {};
+    GetClientRect (g_board, &client);
+    const int panelW = (int) (client.right - client.left);
+
+    // Reading-order units: cards, with collapsed blocks as one chip.
+    std::vector<FlowUnit> units;
     std::set<int> emitted;
+    std::map<std::string, int> orderPos;
+    for (size_t i = 0; i < g_edit.order.size(); ++i) orderPos[g_edit.order[i]] = (int) i;
     for (const auto& key : g_edit.order)
     {
         const int b = BlockOf (key);
@@ -273,160 +284,806 @@ void BuildItems()
             if (!emitted.count (b))
             {
                 emitted.insert (b);
-                DisplayItem h;
-                h.header = true;
-                h.blockIdx = b;
-                h.height = 28;
-                g_items.push_back (h);
+                if (g_edit.blocks[(size_t) b].collapsed)
+                {
+                    FlowUnit u;
+                    u.chip = true;
+                    u.blockIdx = b;
+                    u.width = kChipW;
+                    units.push_back (u);
+                }
             }
-            if (g_edit.blocks[(size_t) b].collapsed) continue; // member hidden
+            if (g_edit.blocks[(size_t) b].collapsed) continue;
         }
-        DisplayItem r;
-        r.key = key;
-        r.height = kRowH;
-        g_items.push_back (r);
+        FlowUnit u;
+        u.key = key;
+        u.width = CardWidthOf (key);
+        units.push_back (u);
     }
-    int y = 0;
-    for (auto& it : g_items) { it.top = y; y += it.height; }
-}
 
-int ContentHeight()
-{
-    return g_items.empty() ? 0 : g_items.back().top + g_items.back().height;
-}
-
-void LayoutRows()
-{
-    if (!g_panel) return;
-    BuildItems();
-    RECT rc {};
-    GetClientRect (g_panel, &rc);
-    const int panelH = (int) (rc.bottom - rc.top);
-    const int contentH = ContentHeight();
-    const int maxScroll = std::max (0, contentH - panelH);
-    if (g_scroll > maxScroll) g_scroll = maxScroll;
-    if (g_scroll < 0) g_scroll = 0;
-
-    SCROLLINFO si { sizeof (si), SIF_RANGE | SIF_PAGE | SIF_POS, 0, contentH, (UINT) panelH, g_scroll, 0 };
-    SetScrollInfo (g_panel, SB_VERT, &si, TRUE);
-
-    std::set<int> shownSlots;
-    int headerPool = 0;
-    bool framePlaced = false;
-    for (const auto& item : g_items)
+    // Wrap into rows.
+    struct Row { std::vector<FlowUnit> units; bool hasPlate = false; };
+    std::vector<Row> rows;
     {
-        const int y = item.top - g_scroll + 2;
-        if (item.header)
+        Row cur;
+        int x = 14;
+        for (const auto& u : units)
         {
-            if (headerPool >= kMaxHeaderPool) continue;
-            HeaderControls& h = g_headers[headerPool++];
-            h.blockIdx = item.blockIdx;
-            const OrderBlock& blk = g_edit.blocks[(size_t) item.blockIdx];
-            const std::wstring text = std::wstring (blk.collapsed ? L"▶ " : L"▼ ") + blk.name +
-                                      L"（" + std::to_wstring (blk.filters.size()) + L"）";
-            SetWindowTextW (h.nameBtn, text.c_str());
-            SetWindowTextW (h.collapseBtn, blk.collapsed ? L"開く" : L"閉じる");
-            SetWindowPos (h.nameBtn, nullptr, 30, y, 470, 24, SWP_NOZORDER | SWP_SHOWWINDOW);
-            SetWindowPos (h.collapseBtn, nullptr, 508, y, 80, 24, SWP_NOZORDER | SWP_SHOWWINDOW);
-            SetWindowPos (h.dissolveBtn, nullptr, 596, y, 80, 24, SWP_NOZORDER | SWP_SHOWWINDOW);
+            if (x + u.width > panelW - 14 && !cur.units.empty())
+            {
+                rows.push_back (cur);
+                cur = Row();
+                x = 14;
+            }
+            cur.units.push_back (u);
+            x += u.width + 12;
+        }
+        if (!cur.units.empty()) rows.push_back (cur);
+    }
+    for (auto& row : rows)
+        for (const auto& u : row.units)
+            if (!u.chip && BlockOf (u.key) >= 0) row.hasPlate = true;
+
+    // Assign coordinates; collect plate segments per (block, row).
+    std::map<std::pair<int, int>, PlateGeom> plateSegs;
+    int y = 10;
+    for (size_t r = 0; r < rows.size(); ++r)
+    {
+        const int head = rows[r].hasPlate ? 26 : 8;
+        const int cardTop = y + head;
+        int x = 14;
+        for (const auto& u : rows[r].units)
+        {
+            if (u.chip)
+            {
+                ChipGeom cg;
+                cg.blockIdx = u.blockIdx;
+                cg.rc = { x, cardTop, x + u.width, cardTop + kChipH };
+                cg.unfoldRc = { cg.rc.right - 52, cg.rc.top + 15, cg.rc.right - 10, cg.rc.bottom - 15 };
+                g_chips.push_back (cg);
+            }
+            else
+            {
+                CardGeom cg;
+                cg.key = u.key;
+                cg.orderPos = orderPos[u.key];
+                cg.rc = { x, cardTop, x + u.width, cardTop + kCardH };
+                int kn = 0;
+                for (int i = 0; i < kNumKnobs; ++i)
+                    if (kKnobs[i].filterKey == u.key) ++kn;
+                int ki = 0;
+                for (int i = 0; i < kNumKnobs; ++i)
+                {
+                    if (kKnobs[i].filterKey != u.key) continue;
+                    KnobGeom kg;
+                    kg.def = &kKnobs[i];
+                    kg.center = { cg.rc.left + (u.width - (kn - 1) * 48) / 2 + ki * 48,
+                                  cg.rc.top + 88 };
+                    cg.knobs.push_back (kg);
+                    ++ki;
+                }
+                if (u.key == "gate")
+                {
+                    cg.hasBreath = true;
+                    cg.breathRc = { cg.rc.right - 86, cg.rc.top + 30, cg.rc.right - 8, cg.rc.top + 49 };
+                }
+                g_cards.push_back (cg);
+                const int b = BlockOf (u.key);
+                if (b >= 0)
+                {
+                    auto& pg = plateSegs[{ b, (int) r }];
+                    if (pg.blockIdx < 0)
+                    {
+                        pg.blockIdx = b;
+                        pg.rc = { cg.rc.left - 7, cg.rc.top - 22, cg.rc.right + 7, cg.rc.bottom + 7 };
+                    }
+                    else
+                    {
+                        pg.rc.left = std::min (pg.rc.left, cg.rc.left - 7);
+                        pg.rc.right = std::max (pg.rc.right, cg.rc.right + 7);
+                        pg.rc.top = std::min (pg.rc.top, cg.rc.top - 22);
+                        pg.rc.bottom = std::max (pg.rc.bottom, cg.rc.bottom + 7);
+                    }
+                }
+            }
+            x += u.width + 12;
+        }
+        y = cardTop + kCardH + 16;
+    }
+    g_contentH = y;
+    std::set<int> firstSeen;
+    for (auto& kv : plateSegs)
+    {
+        PlateGeom pg = kv.second;
+        pg.first = !firstSeen.count (pg.blockIdx);
+        firstSeen.insert (pg.blockIdx);
+        pg.tabRc = { pg.rc.left + 4, pg.rc.top + 1, pg.rc.right - 4, pg.rc.top + 21 };
+        if (pg.first)
+        {
+            // Narrow plates shrink the buttons to glyphs so the name fits.
+            const bool wide = (pg.rc.right - pg.rc.left) >= 240;
+            const int dw = wide ? 46 : 18, fw = wide ? 44 : 16;
+            pg.dissolveRc = { pg.rc.right - 6 - dw, pg.rc.top + 2, pg.rc.right - 6, pg.rc.top + 20 };
+            pg.foldRc = { pg.dissolveRc.left - 4 - fw, pg.rc.top + 2, pg.dissolveRc.left - 4, pg.rc.top + 20 };
+            pg.tabRc.right = pg.foldRc.left - 2;
+        }
+        g_plates.push_back (pg);
+    }
+}
+
+// --- Drawing ---------------------------------------------------------------
+Gdiplus::Color AccentFor (int pos, bool on)
+{
+    static const Gdiplus::Color kPalette[] = {
+        { 255, 96, 142, 205 }, { 255, 118, 178, 118 }, { 255, 205, 150, 92 },
+        { 255, 172, 122, 205 }, { 255, 92, 182, 192 }, { 255, 205, 112, 112 },
+        { 255, 152, 162, 94 }, { 255, 122, 132, 205 },
+    };
+    if (!on) return Gdiplus::Color (255, 110, 114, 120);
+    return kPalette[pos % 8];
+}
+
+void FillRoundRect (Gdiplus::Graphics& g, const RECT& rc, float rad, const Gdiplus::Color& col)
+{
+    Gdiplus::GraphicsPath path;
+    const float x = (float) rc.left, y = (float) rc.top;
+    const float w = (float) (rc.right - rc.left), h = (float) (rc.bottom - rc.top);
+    const float d = rad * 2;
+    path.AddArc (x, y, d, d, 180, 90);
+    path.AddArc (x + w - d, y, d, d, 270, 90);
+    path.AddArc (x + w - d, y + h - d, d, d, 0, 90);
+    path.AddArc (x, y + h - d, d, d, 90, 90);
+    path.CloseFigure();
+    Gdiplus::SolidBrush brush (col);
+    g.FillPath (&brush, &path);
+}
+
+void StrokeRoundRect (Gdiplus::Graphics& g, const RECT& rc, float rad, const Gdiplus::Color& col, float width = 1.0f)
+{
+    Gdiplus::GraphicsPath path;
+    const float x = (float) rc.left, y = (float) rc.top;
+    const float w = (float) (rc.right - rc.left), h = (float) (rc.bottom - rc.top);
+    const float d = rad * 2;
+    path.AddArc (x, y, d, d, 180, 90);
+    path.AddArc (x + w - d, y, d, d, 270, 90);
+    path.AddArc (x + w - d, y + h - d, d, d, 0, 90);
+    path.AddArc (x, y + h - d, d, d, 90, 90);
+    path.CloseFigure();
+    Gdiplus::Pen pen (col, width);
+    g.DrawPath (&pen, &path);
+}
+
+void DrawText (Gdiplus::Graphics& g, const std::wstring& text, const RECT& rc,
+               float size, const Gdiplus::Color& col, bool center = false, bool bold = false)
+{
+    Gdiplus::FontFamily fam (L"MS UI Gothic");
+    Gdiplus::Font font (&fam, size, bold ? Gdiplus::FontStyleBold : Gdiplus::FontStyleRegular,
+                        Gdiplus::UnitPoint);
+    Gdiplus::SolidBrush brush (col);
+    Gdiplus::StringFormat fmt;
+    fmt.SetAlignment (center ? Gdiplus::StringAlignmentCenter : Gdiplus::StringAlignmentNear);
+    fmt.SetLineAlignment (Gdiplus::StringAlignmentCenter);
+    fmt.SetTrimming (Gdiplus::StringTrimmingEllipsisCharacter);
+    fmt.SetFormatFlags (Gdiplus::StringFormatFlagsNoWrap);
+    Gdiplus::RectF rf ((float) rc.left, (float) rc.top, (float) (rc.right - rc.left),
+                       (float) (rc.bottom - rc.top));
+    g.DrawString (text.c_str(), -1, &font, rf, &fmt, &brush);
+}
+
+// Drag state for the board.
+bool g_bDragging = false;
+int g_bDragKind = 0; // 1 = card, 2 = block
+std::string g_bDragKey;
+int g_bDragBlock = -1;
+POINT g_bDragStart { 0, 0 };
+POINT g_bDragNow { 0, 0 };
+bool g_bHasDrop = false;
+std::string g_bDropBefore;
+std::wstring g_bDropInside;
+RECT g_bCaret {};
+const KnobDef* g_knobDragDef = nullptr;
+int g_knobDragStartY = 0;
+double g_knobDragStartVal = 0;
+int g_pendingAction = 0; // 1 = fold, 2 = dissolve, 3 = unfold
+int g_pendingBlock = -1;
+
+std::wstring KnobValueOnly (const KnobDef& def, double v)
+{
+    wchar_t buf[64];
+    switch (def.format)
+    {
+        case 0: swprintf_s (buf, L"%d%s", (int) std::lround (v), def.unit); break;
+        case 1: swprintf_s (buf, L"%.1f%s", v, def.unit); break;
+        case 3: swprintf_s (buf, L"%d%%", (int) std::lround (v * 100.0)); break;
+        case 4: swprintf_s (buf, L"%.1f:1", v); break;
+        default: swprintf_s (buf, L"%.2f%s", v, def.unit); break;
+    }
+    return buf;
+}
+
+void DrawBoard (HDC hdc, const RECT& client)
+{
+    const int W = (int) (client.right - client.left), H = (int) (client.bottom - client.top);
+    HDC mem = CreateCompatibleDC (hdc);
+    HBITMAP bmp = CreateCompatibleBitmap (hdc, W, H);
+    HGDIOBJ oldBmp = SelectObject (mem, bmp);
+    {
+        Gdiplus::Graphics g (mem);
+        g.SetSmoothingMode (Gdiplus::SmoothingModeAntiAlias);
+        g.Clear (Gdiplus::Color (255, 34, 36, 40));
+        g.TranslateTransform (0.0f, (float) -g_boardScroll);
+
+        const Gdiplus::Color kText (255, 228, 230, 234);
+        const Gdiplus::Color kDim (255, 150, 154, 160);
+
+        // Backplates.
+        for (const auto& pg : g_plates)
+        {
+            FillRoundRect (g, pg.rc, 8, Gdiplus::Color (255, 46, 49, 56));
+            StrokeRoundRect (g, pg.rc, 8, Gdiplus::Color (255, 84, 88, 98));
+            if (pg.first)
+            {
+                const OrderBlock& blk = g_edit.blocks[(size_t) pg.blockIdx];
+                RECT nameRc { pg.rc.left + 10, pg.rc.top + 1, pg.foldRc.left - 4, pg.rc.top + 21 };
+                DrawText (g, blk.name, nameRc, 9, kText, false, true);
+                const bool wideBtns = (pg.foldRc.right - pg.foldRc.left) >= 40;
+                DrawText (g, wideBtns ? L"閉じる" : L"－", pg.foldRc, 8, kDim, true);
+                DrawText (g, wideBtns ? L"解散" : L"×", pg.dissolveRc, 8, kDim, true);
+            }
+        }
+        // Collapsed chips.
+        for (const auto& cg : g_chips)
+        {
+            const OrderBlock& blk = g_edit.blocks[(size_t) cg.blockIdx];
+            FillRoundRect (g, cg.rc, 8, Gdiplus::Color (255, 52, 55, 62));
+            StrokeRoundRect (g, cg.rc, 8, Gdiplus::Color (255, 96, 100, 110));
+            RECT nameRc { cg.rc.left + 10, cg.rc.top, cg.unfoldRc.left - 4, cg.rc.bottom };
+            DrawText (g, L"▶ " + blk.name + L"（" + std::to_wstring (blk.filters.size()) + L"）",
+                      nameRc, 10, kText, false, true);
+            DrawText (g, L"開く", cg.unfoldRc, 9, kDim, true);
+        }
+        // Cards.
+        for (const auto& cg : g_cards)
+        {
+            const FilterInfo* info = FindFilter (cg.key);
+            const bool on = g_edit.on.count (cg.key) && g_edit.on.at (cg.key);
+            const Gdiplus::Color accent = AccentFor (cg.orderPos, on);
+            FillRoundRect (g, cg.rc, 8, Gdiplus::Color (255, 48, 51, 58));
+            if (cg.key == g_selKey)
+                StrokeRoundRect (g, cg.rc, 8, Gdiplus::Color (255, 235, 238, 242), 2.0f);
+            else
+                StrokeRoundRect (g, cg.rc, 8, Gdiplus::Color (255, 76, 79, 88));
+            RECT strip { cg.rc.left + 8, cg.rc.top + 4, cg.rc.right - 8, cg.rc.top + 7 };
+            FillRoundRect (g, strip, 1.5f, accent);
+            RECT titleRc { cg.rc.left + 9, cg.rc.top + 9, cg.rc.right - 24, cg.rc.top + 29 };
+            DrawText (g, info ? info->label : L"?", titleRc, 9.0f,
+                      on ? kText : kDim, false, true);
+            // Power LED.
+            const POINT pc { cg.rc.right - 15, cg.rc.top + 18 };
+            Gdiplus::SolidBrush led (on ? Gdiplus::Color (255, 92, 224, 130)
+                                        : Gdiplus::Color (255, 74, 77, 84));
+            g.FillEllipse (&led, pc.x - 6, pc.y - 6, 12, 12);
+            // Order badge.
+            RECT badgeRc { cg.rc.left + 9, cg.rc.bottom - 18, cg.rc.left + 40, cg.rc.bottom - 2 };
+            DrawText (g, L"#" + std::to_wstring (cg.orderPos + 1), badgeRc, 8, kDim);
+            // Breath pill (gate).
+            if (cg.hasBreath)
+            {
+                const bool bOn = g_edit.on.count ("breath") && g_edit.on.at ("breath");
+                FillRoundRect (g, cg.breathRc, 8, bOn ? Gdiplus::Color (255, 66, 92, 74)
+                                                      : Gdiplus::Color (255, 58, 61, 68));
+                DrawText (g, L"吐息キープ", cg.breathRc, 8, bOn ? kText : kDim, true);
+            }
+            // Knobs.
+            for (const auto& kg : cg.knobs)
+            {
+                const double v = KnobValue (*kg.def);
+                const auto& range = MicFilterParams::rangeFor (kg.def->paramId);
+                const double t = (v - range.min) / (range.max - range.min);
+                const float ang = (float) (-225.0 + t * 270.0); // degrees, 0 = east
+                const float rad = ang * 3.14159265f / 180.0f;
+                RECT labelRc { kg.center.x - 36, kg.center.y - 37, kg.center.x + 36, kg.center.y - 21 };
+                DrawText (g, kg.def->label, labelRc, 8, on ? kText : kDim, true);
+                Gdiplus::SolidBrush body (Gdiplus::Color (255, 26, 27, 31));
+                g.FillEllipse (&body, kg.center.x - kKnobR, kg.center.y - kKnobR,
+                               kKnobR * 2, kKnobR * 2);
+                Gdiplus::Pen rim (accent, 2.0f);
+                g.DrawEllipse (&rim, kg.center.x - kKnobR, kg.center.y - kKnobR,
+                               kKnobR * 2, kKnobR * 2);
+                Gdiplus::Pen ptr (on ? kText : kDim, 2.5f);
+                g.DrawLine (&ptr, (float) kg.center.x, (float) kg.center.y,
+                            kg.center.x + (float) (std::cos (rad) * (kKnobR - 3)),
+                            kg.center.y + (float) (std::sin (rad) * (kKnobR - 3)));
+                RECT valRc { kg.center.x - 36, kg.center.y + 19, kg.center.x + 36, kg.center.y + 35 };
+                DrawText (g, KnobValueOnly (*kg.def, v), valRc, 8, on ? kText : kDim, true);
+            }
+            if (cg.knobs.empty())
+            {
+                // Neutral level-bars motif for knob-less modules.
+                const int bx = (cg.rc.left + cg.rc.right) / 2, by = cg.rc.top + 88;
+                const int hs[5] = { 10, 18, 26, 14, 21 };
+                for (int i = 0; i < 5; ++i)
+                {
+                    RECT bar { bx - 22 + i * 10, by - hs[i] / 2, bx - 16 + i * 10, by + hs[i] / 2 };
+                    FillRoundRect (g, bar, 2, on ? accent : Gdiplus::Color (255, 84, 87, 94));
+                }
+            }
+        }
+        // Flow arrows between neighbours in a row.
+        for (size_t i = 0; i + 1 < g_cards.size(); ++i)
+        {
+            const RECT& a = g_cards[i].rc;
+            const RECT& b = g_cards[i + 1].rc;
+            if (a.top == b.top && b.left > a.right)
+            {
+                const int cx = (a.right + b.left) / 2, cy = a.top + kCardH / 2;
+                Gdiplus::SolidBrush br (Gdiplus::Color (255, 120, 124, 132));
+                Gdiplus::Point pts[3] = { { cx - 3, cy - 5 }, { cx - 3, cy + 5 }, { cx + 4, cy } };
+                g.FillPolygon (&br, pts, 3);
+            }
+        }
+        // Drop caret.
+        if (g_bDragging && g_bHasDrop)
+        {
+            Gdiplus::SolidBrush br (Gdiplus::Color (255, 250, 200, 90));
+            g.FillRectangle (&br, (float) g_bCaret.left, (float) g_bCaret.top,
+                             3.0f, (float) (g_bCaret.bottom - g_bCaret.top));
+        }
+        if (g_editLocked)
+        {
+            Gdiplus::SolidBrush wash (Gdiplus::Color (46, 190, 196, 205));
+            g.FillRectangle (&wash, 0, g_boardScroll, W, H);
+        }
+    }
+    BitBlt (hdc, 0, 0, W, H, mem, 0, 0, SRCCOPY);
+    SelectObject (mem, oldBmp);
+    DeleteObject (bmp);
+    DeleteDC (mem);
+}
+
+void RefreshBoard()
+{
+    if (g_board) InvalidateRect (g_board, nullptr, FALSE);
+}
+
+// --- Hit testing & dropping ----------------------------------------------------
+struct Hit
+{
+    int kind = 0; // 1 knob, 2 power, 3 breath, 4 card, 5 plate tab, 6 fold, 7 dissolve, 8 chip, 9 unfold
+    const CardGeom* card = nullptr;
+    const KnobDef* knob = nullptr;
+    int blockIdx = -1;
+};
+
+bool InRect (const RECT& rc, POINT pt) { return pt.x >= rc.left && pt.x < rc.right && pt.y >= rc.top && pt.y < rc.bottom; }
+
+Hit HitTest (POINT pt)
+{
+    Hit h;
+    for (const auto& pg : g_plates)
+        if (pg.first)
+        {
+            if (InRect (pg.foldRc, pt)) { h.kind = 6; h.blockIdx = pg.blockIdx; return h; }
+            if (InRect (pg.dissolveRc, pt)) { h.kind = 7; h.blockIdx = pg.blockIdx; return h; }
+        }
+    for (const auto& cg : g_chips)
+    {
+        if (InRect (cg.unfoldRc, pt)) { h.kind = 9; h.blockIdx = cg.blockIdx; return h; }
+        if (InRect (cg.rc, pt)) { h.kind = 8; h.blockIdx = cg.blockIdx; return h; }
+    }
+    for (const auto& cg : g_cards)
+    {
+        for (const auto& kg : cg.knobs)
+        {
+            const int dx = pt.x - kg.center.x, dy = pt.y - kg.center.y;
+            if (dx * dx + dy * dy <= (kKnobR + 4) * (kKnobR + 4))
+            {
+                h.kind = 1; h.card = &cg; h.knob = kg.def; return h;
+            }
+        }
+        const POINT pc { cg.rc.right - 15, cg.rc.top + 18 };
+        const int dx = pt.x - pc.x, dy = pt.y - pc.y;
+        if (dx * dx + dy * dy <= 11 * 11) { h.kind = 2; h.card = &cg; return h; }
+        if (cg.hasBreath && InRect (cg.breathRc, pt)) { h.kind = 3; h.card = &cg; return h; }
+    }
+    for (const auto& pg : g_plates)
+        if (InRect (pg.tabRc, pt)) { h.kind = 5; h.blockIdx = pg.blockIdx; return h; }
+    for (const auto& cg : g_cards)
+        if (InRect (cg.rc, pt)) { h.kind = 4; h.card = &cg; return h; }
+    return h;
+}
+
+bool IsDraggedKey (const std::string& key)
+{
+    if (g_bDragKind == 1) return key == g_bDragKey;
+    if (g_bDragKind == 2 && g_bDragBlock >= 0 && g_bDragBlock < (int) g_edit.blocks.size())
+        for (const auto& k : g_edit.blocks[(size_t) g_bDragBlock].filters)
+            if (k == key) return true;
+    return false;
+}
+
+struct Anchor
+{
+    std::string key;   // card key, or first member key for a chip
+    int blockIdx = -1; // block the anchor belongs to (chip: its block)
+    POINT center { 0, 0 };
+    RECT rc {};
+};
+
+std::vector<Anchor> BuildAnchors()
+{
+    std::vector<Anchor> out;
+    std::set<int> emitted;
+    for (const auto& key : g_edit.order)
+    {
+        if (IsDraggedKey (key)) continue;
+        const int b = BlockOf (key);
+        if (b >= 0 && g_edit.blocks[(size_t) b].collapsed)
+        {
+            if (emitted.count (b)) continue;
+            emitted.insert (b);
+            for (const auto& cg : g_chips)
+                if (cg.blockIdx == b)
+                {
+                    Anchor a;
+                    a.key = key;
+                    a.blockIdx = b;
+                    a.rc = cg.rc;
+                    a.center = { (cg.rc.left + cg.rc.right) / 2, (cg.rc.top + cg.rc.bottom) / 2 };
+                    out.push_back (a);
+                }
             continue;
         }
-        const int s = SlotOf (item.key);
-        if (s < 0) continue;
-        shownSlots.insert (s);
-        RowControls& r = g_rows[s];
-        const int xoff = BlockOf (item.key) >= 0 ? 16 : 0;
-        SetWindowPos (r.toggle, nullptr, 6 + xoff, y, 206, 42, SWP_NOZORDER | SWP_SHOWWINDOW);
-        if (r.breath)
-            SetWindowPos (r.breath, nullptr, 226 + xoff, y + 12, 128, 20, SWP_NOZORDER | SWP_SHOWWINDOW);
-        const int knobStart = r.breath ? 362 : 226;
-        for (int j = 0; j < r.knobCount; ++j)
-        {
-            const int x = knobStart + xoff + j * 124;
-            SetWindowPos (r.knobLabel[j], nullptr, x, y, 120, 13, SWP_NOZORDER | SWP_SHOWWINDOW);
-            SetWindowPos (r.knobSlider[j], nullptr, x, y + 14, 120, 28, SWP_NOZORDER | SWP_SHOWWINDOW);
-        }
-        if (!g_dragging && item.key == g_selKey)
-        {
-            SetWindowPos (g_frame, nullptr, 2, y - 2, 744, kRowH, SWP_NOZORDER | SWP_SHOWWINDOW);
-            framePlaced = true;
-        }
+        for (const auto& cg : g_cards)
+            if (cg.key == key)
+            {
+                Anchor a;
+                a.key = key;
+                a.blockIdx = b;
+                a.rc = cg.rc;
+                a.center = { (cg.rc.left + cg.rc.right) / 2, (cg.rc.top + cg.rc.bottom) / 2 };
+                out.push_back (a);
+            }
     }
-    for (; headerPool < kMaxHeaderPool; ++headerPool)
-    {
-        ShowWindow (g_headers[headerPool].nameBtn, SW_HIDE);
-        ShowWindow (g_headers[headerPool].collapseBtn, SW_HIDE);
-        ShowWindow (g_headers[headerPool].dissolveBtn, SW_HIDE);
-        g_headers[headerPool].blockIdx = -1;
-    }
-    for (int s = 0; s < kNumSlots; ++s)
-    {
-        if (shownSlots.count (s)) continue;
-        RowControls& r = g_rows[s];
-        ShowWindow (r.toggle, SW_HIDE);
-        if (r.breath) ShowWindow (r.breath, SW_HIDE);
-        for (int j = 0; j < r.knobCount; ++j)
-        {
-            ShowWindow (r.knobLabel[j], SW_HIDE);
-            ShowWindow (r.knobSlider[j], SW_HIDE);
-        }
-    }
-    if (!g_dragging && !framePlaced) ShowWindow (g_frame, SW_HIDE);
+    return out;
 }
 
-void RefreshChain()
+void ComputeDrop (POINT pt)
 {
-    for (int s = 0; s < kNumSlots; ++s)
+    const std::vector<Anchor> anchors = BuildAnchors();
+    g_bDropBefore.clear();
+    g_bDropInside.clear();
+    g_bHasDrop = true;
+    size_t ins = anchors.size();
+    for (size_t i = 0; i < anchors.size(); ++i)
     {
-        RowControls& r = g_rows[s];
-        const std::string key = kSlotKeys[s];
-        const FilterInfo* info = FindFilter (key);
-        const auto it = g_edit.on.find (key);
-        const bool on = it != g_edit.on.end() && it->second;
-        SendMessageW (r.toggle, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
-        SetToggleText (r.toggle, on, info ? info->label : L"?");
-        for (int j = 0; j < r.knobCount; ++j)
+        const Anchor& a = anchors[i];
+        if (pt.y < a.rc.top || (pt.y < a.rc.bottom && pt.x < a.center.x)) { ins = i; break; }
+    }
+    if (ins < anchors.size()) g_bDropBefore = anchors[ins].key;
+    // Inside a block: dropped on a chip, or between two members of one block.
+    for (const auto& cg : g_chips)
+        if (InRect (cg.rc, pt) && cg.blockIdx != g_bDragBlock)
         {
-            const KnobDef& def = *r.knobs[j];
-            const auto& range = MicFilterParams::rangeFor (def.paramId);
-            const double v = KnobValue (def);
-            const int pos = (int) std::lround ((v - range.min) / (range.max - range.min) * 1000.0);
-            SendMessageW (r.knobSlider[j], TBM_SETPOS, TRUE, pos);
-            SetWindowTextW (r.knobLabel[j], KnobValueText (def, v).c_str());
+            g_bDropInside = g_edit.blocks[(size_t) cg.blockIdx].name;
+            return;
         }
-    }
-    if (g_rows[SlotOf ("gate")].breath)
+    if (ins > 0 && ins < anchors.size())
     {
-        const auto it = g_edit.on.find ("breath");
-        const bool on = it != g_edit.on.end() && it->second;
-        HWND b = g_rows[SlotOf ("gate")].breath;
-        SendMessageW (b, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
-        SetToggleText (b, on, L"吐息キープ");
+        const int pb = anchors[ins - 1].blockIdx, nb = anchors[ins].blockIdx;
+        if (pb >= 0 && pb == nb && pb != g_bDragBlock)
+            g_bDropInside = g_edit.blocks[(size_t) pb].name;
     }
-    LayoutRows();
+    // Caret geometry.
+    if (ins < anchors.size())
+    {
+        const RECT& r = anchors[ins].rc;
+        g_bCaret = { r.left - 8, r.top, r.left - 5, r.bottom };
+    }
+    else if (!anchors.empty())
+    {
+        const RECT& r = anchors.back().rc;
+        g_bCaret = { r.right + 5, r.top, r.right + 8, r.bottom };
+    }
+    else g_bHasDrop = false;
 }
 
-void RefreshPresetList (const std::wstring& selectName)
+void ApplyDrop()
+{
+    auto& ord = g_edit.order;
+    auto insertPos = [&] {
+        if (g_bDropBefore.empty()) return ord.end();
+        return std::find (ord.begin(), ord.end(), g_bDropBefore);
+    };
+    if (g_bDragKind == 1)
+    {
+        const std::string key = g_bDragKey;
+        const int oldBlock = BlockOf (key);
+        if (oldBlock >= 0)
+        {
+            auto& f = g_edit.blocks[(size_t) oldBlock].filters;
+            f.erase (std::remove (f.begin(), f.end(), key), f.end());
+            if (f.empty()) g_edit.blocks.erase (g_edit.blocks.begin() + oldBlock);
+        }
+        ord.erase (std::remove (ord.begin(), ord.end(), key), ord.end());
+        ord.insert (insertPos(), key);
+        if (!g_bDropInside.empty())
+            for (auto& blk : g_edit.blocks)
+                if (blk.name == g_bDropInside)
+                {
+                    blk.filters.push_back (key);
+                    std::sort (blk.filters.begin(), blk.filters.end(),
+                               [&] (const std::string& a, const std::string& b) {
+                                   return std::find (ord.begin(), ord.end(), a) <
+                                          std::find (ord.begin(), ord.end(), b);
+                               });
+                    break;
+                }
+        g_selKey = key;
+    }
+    else if (g_bDragKind == 2 && g_bDragBlock >= 0 && g_bDragBlock < (int) g_edit.blocks.size())
+    {
+        const std::vector<std::string> chunk = g_edit.blocks[(size_t) g_bDragBlock].filters;
+        for (const auto& k : chunk)
+            ord.erase (std::remove (ord.begin(), ord.end(), k), ord.end());
+        ord.insert (insertPos(), chunk.begin(), chunk.end());
+    }
+    Commit();
+    RefreshBoard();
+}
+
+void ClampBoardScroll()
+{
+    RECT client {};
+    GetClientRect (g_board, &client);
+    const int maxScroll = std::max (0, g_contentH - (int) (client.bottom - client.top));
+    g_boardScroll = std::clamp (g_boardScroll, 0, maxScroll);
+}
+
+LRESULT CALLBACK BoardProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg)
+    {
+        case WM_PAINT:
+        {
+            PAINTSTRUCT ps {};
+            HDC hdc = BeginPaint (hwnd, &ps);
+            LayoutBoard();
+            ClampBoardScroll();
+            RECT client {};
+            GetClientRect (hwnd, &client);
+            DrawBoard (hdc, client);
+            EndPaint (hwnd, &ps);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_LBUTTONDOWN:
+        {
+            SetFocus (hwnd);
+            LayoutBoard();
+            const POINT clientPt { (short) LOWORD (lp), (short) HIWORD (lp) };
+            const POINT pt { clientPt.x, clientPt.y + g_boardScroll };
+            const Hit h = HitTest (pt);
+            if (g_editLocked)
+            {
+                if (h.kind == 4 && h.card) { g_selKey = h.card->key; RefreshBoard(); }
+                return 0;
+            }
+            switch (h.kind)
+            {
+                case 1:
+                    g_knobDragDef = h.knob;
+                    g_knobDragStartY = clientPt.y;
+                    g_knobDragStartVal = KnobValue (*h.knob);
+                    if (h.card) g_selKey = h.card->key;
+                    SetCapture (hwnd);
+                    break;
+                case 2:
+                    g_edit.on[h.card->key] = !(g_edit.on.count (h.card->key) && g_edit.on.at (h.card->key));
+                    g_selKey = h.card->key;
+                    Commit();
+                    RefreshBoard();
+                    break;
+                case 3:
+                    g_edit.on["breath"] = !(g_edit.on.count ("breath") && g_edit.on.at ("breath"));
+                    Commit();
+                    RefreshBoard();
+                    break;
+                case 6: case 7: case 9:
+                    g_pendingAction = h.kind == 6 ? 1 : h.kind == 7 ? 2 : 3;
+                    g_pendingBlock = h.blockIdx;
+                    SetCapture (hwnd);
+                    break;
+                case 5: case 8:
+                    g_bDragKind = 2;
+                    g_bDragBlock = h.blockIdx;
+                    g_bDragging = false;
+                    g_bDragStart = g_bDragNow = pt;
+                    SetCapture (hwnd);
+                    break;
+                case 4:
+                    g_selKey = h.card->key;
+                    g_bDragKind = 1;
+                    g_bDragKey = h.card->key;
+                    g_bDragging = false;
+                    g_bDragStart = g_bDragNow = pt;
+                    SetCapture (hwnd);
+                    RefreshBoard();
+                    break;
+            }
+            return 0;
+        }
+        case WM_MOUSEMOVE:
+        {
+            const POINT clientPt { (short) LOWORD (lp), (short) HIWORD (lp) };
+            if (g_knobDragDef)
+            {
+                const auto& range = MicFilterParams::rangeFor (g_knobDragDef->paramId);
+                const double span = (wp & MK_SHIFT) ? 1400.0 : 140.0;
+                double v = g_knobDragStartVal +
+                           (g_knobDragStartY - clientPt.y) * (range.max - range.min) / span;
+                v = std::round ((v - range.min) / g_knobDragDef->step) * g_knobDragDef->step + range.min;
+                v = std::clamp (v, (double) range.min, (double) range.max);
+                if (v != KnobValue (*g_knobDragDef))
+                {
+                    g_edit.values[g_knobDragDef->valueKey] = v;
+                    Commit();
+                    RefreshBoard();
+                }
+                return 0;
+            }
+            if ((g_bDragKind == 1 || g_bDragKind == 2) && (wp & MK_LBUTTON))
+            {
+                const POINT pt { clientPt.x, clientPt.y + g_boardScroll };
+                g_bDragNow = pt;
+                if (!g_bDragging &&
+                    (std::abs (pt.x - g_bDragStart.x) > 7 || std::abs (pt.y - g_bDragStart.y) > 7))
+                    g_bDragging = true;
+                if (g_bDragging)
+                {
+                    LayoutBoard();
+                    ComputeDrop (pt);
+                    RefreshBoard();
+                }
+            }
+            return 0;
+        }
+        case WM_LBUTTONUP:
+        {
+            const bool hadCapture = GetCapture() == hwnd;
+            if (g_knobDragDef) { g_knobDragDef = nullptr; ReleaseCapture(); return 0; }
+            if (g_pendingAction)
+            {
+                LayoutBoard();
+                const POINT pt { (short) LOWORD (lp), (short) HIWORD (lp) + g_boardScroll };
+                const Hit h = HitTest (pt);
+                const int want = g_pendingAction == 1 ? 6 : g_pendingAction == 2 ? 7 : 9;
+                if (h.kind == want && h.blockIdx == g_pendingBlock &&
+                    g_pendingBlock >= 0 && g_pendingBlock < (int) g_edit.blocks.size())
+                {
+                    if (g_pendingAction == 1) g_edit.blocks[(size_t) g_pendingBlock].collapsed = true;
+                    else if (g_pendingAction == 2) g_edit.blocks.erase (g_edit.blocks.begin() + g_pendingBlock);
+                    else g_edit.blocks[(size_t) g_pendingBlock].collapsed = false;
+                    Commit();
+                    RefreshBoard();
+                }
+                g_pendingAction = 0;
+                g_pendingBlock = -1;
+                if (hadCapture) ReleaseCapture();
+                return 0;
+            }
+            if (g_bDragKind)
+            {
+                if (g_bDragging) ApplyDrop();
+                g_bDragKind = 0;
+                g_bDragging = false;
+                g_bHasDrop = false;
+                if (hadCapture) ReleaseCapture();
+                RefreshBoard();
+                return 0;
+            }
+            return 0;
+        }
+        case WM_LBUTTONDBLCLK:
+        {
+            LayoutBoard();
+            const POINT pt { (short) LOWORD (lp), (short) HIWORD (lp) + g_boardScroll };
+            const Hit h = HitTest (pt);
+            g_knobDragDef = nullptr;
+            g_bDragKind = 0;
+            g_bDragging = false;
+            if (g_editLocked) return 0;
+            if (h.kind == 1 && h.knob)
+            {
+                const auto& range = MicFilterParams::rangeFor (h.knob->paramId);
+                g_edit.values[h.knob->valueKey] = range.def;
+                if (h.card) g_selKey = h.card->key;
+                Commit();
+                RefreshBoard();
+            }
+            else if (h.kind == 5 && h.blockIdx >= 0 && h.blockIdx < (int) g_edit.blocks.size())
+            {
+                std::wstring name;
+                if (PromptText (g_win, L"ブロック名の変更", g_edit.blocks[(size_t) h.blockIdx].name, name))
+                {
+                    g_edit.blocks[(size_t) h.blockIdx].name = name;
+                    Commit();
+                    RefreshBoard();
+                }
+            }
+            else if (h.kind == 8 && h.blockIdx >= 0 && h.blockIdx < (int) g_edit.blocks.size())
+            {
+                g_edit.blocks[(size_t) h.blockIdx].collapsed = false;
+                Commit();
+                RefreshBoard();
+            }
+            return 0;
+        }
+        case WM_MOUSEWHEEL:
+        {
+            POINT sp { (short) LOWORD (lp), (short) HIWORD (lp) };
+            ScreenToClient (hwnd, &sp);
+            LayoutBoard();
+            const POINT pt { sp.x, sp.y + g_boardScroll };
+            const Hit h = HitTest (pt);
+            const int notches = (int) GET_WHEEL_DELTA_WPARAM (wp) / 120;
+            if (!g_editLocked && h.kind == 1 && h.knob && notches != 0)
+            {
+                const auto& range = MicFilterParams::rangeFor (h.knob->paramId);
+                double v = KnobValue (*h.knob) + notches * h.knob->step * 4.0;
+                v = std::round ((v - range.min) / h.knob->step) * h.knob->step + range.min;
+                v = std::clamp (v, (double) range.min, (double) range.max);
+                if (v != KnobValue (*h.knob))
+                {
+                    g_edit.values[h.knob->valueKey] = v;
+                    Commit();
+                    RefreshBoard();
+                }
+                return 0;
+            }
+            g_boardScroll -= notches * 46;
+            ClampBoardScroll();
+            RefreshBoard();
+            return 0;
+        }
+        case WM_CAPTURECHANGED:
+            g_knobDragDef = nullptr;
+            g_pendingAction = 0;
+            g_bDragKind = 0;
+            g_bDragging = false;
+            g_bHasDrop = false;
+            RefreshBoard();
+            return 0;
+        case WM_SIZE:
+            RefreshBoard();
+            return 0;
+    }
+    return DefWindowProcW (hwnd, msg, wp, lp);
+}
+
+// --- Preset bar / editor state ---------------------------------------------------
+void RefreshPresetCombo (const std::wstring& selectName)
 {
     const std::vector<std::wstring> names = ListPresetNames();
-    HWND lb = SCtl (S_PRESET_LIST);
-    SendMessageW (lb, LB_RESETCONTENT, 0, 0);
+    HWND combo = SCtl (S_PRESET_COMBO);
+    SendMessageW (combo, CB_RESETCONTENT, 0, 0);
     int select = 0;
     for (size_t i = 0; i < names.size(); ++i)
     {
-        SendMessageW (lb, LB_ADDSTRING, 0, reinterpret_cast<LPARAM> (names[i].c_str()));
+        SendMessageW (combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM> (names[i].c_str()));
         if (names[i] == selectName) select = (int) i;
     }
-    if (!names.empty()) SendMessageW (lb, LB_SETCURSEL, select, 0);
+    if (!names.empty()) SendMessageW (combo, CB_SETCURSEL, select, 0);
 }
 
 std::wstring SelectedPresetName()
 {
-    HWND lb = SCtl (S_PRESET_LIST);
-    const LRESULT sel = SendMessageW (lb, LB_GETCURSEL, 0, 0);
-    if (sel == LB_ERR) return L"";
+    HWND combo = SCtl (S_PRESET_COMBO);
+    const LRESULT sel = SendMessageW (combo, CB_GETCURSEL, 0, 0);
+    if (sel == CB_ERR) return L"";
     wchar_t buf[256];
-    SendMessageW (lb, LB_GETTEXT, sel, reinterpret_cast<LPARAM> (buf));
+    SendMessageW (combo, CB_GETLBTEXT, sel, reinterpret_cast<LPARAM> (buf));
     return buf;
 }
 
@@ -436,19 +1093,7 @@ void ApplyLockState()
     EnableWindow (SCtl (S_PRESET_RENAME), en);
     EnableWindow (SCtl (S_PRESET_DELETE), en);
     EnableWindow (SCtl (S_BLOCK_CREATE), en);
-    for (int s = 0; s < kNumSlots; ++s)
-    {
-        RowControls& r = g_rows[s];
-        EnableWindow (r.toggle, en);
-        if (r.breath) EnableWindow (r.breath, en);
-        for (int j = 0; j < r.knobCount; ++j) EnableWindow (r.knobSlider[j], en);
-    }
-    for (int i = 0; i < kMaxHeaderPool; ++i)
-    {
-        EnableWindow (g_headers[i].nameBtn, en);
-        EnableWindow (g_headers[i].collapseBtn, en);
-        EnableWindow (g_headers[i].dissolveBtn, en);
-    }
+    SetWindowTextW (SCtl (S_LOCK_LABEL), g_editLocked ? L"変更不可" : L"");
 }
 
 void LoadIntoEditor (const std::wstring& name)
@@ -459,253 +1104,13 @@ void LoadIntoEditor (const std::wstring& name)
     g_editIsMainCurrent = g_edit.name == g_mainCurrent;
     g_editLocked = IsProtectedPreset (g_edit.name);
     g_selKey = "gate";
-    g_scroll = 0;
-    RefreshChain();
+    g_boardScroll = 0;
+    RefreshBoard();
     ApplyLockState();
     wchar_t title[340];
     swprintf_s (title, g_editLocked ? L"フィルター設定 - %s（変更不可）" : L"フィルター設定 - %s",
                 g_edit.name.c_str());
     SetWindowTextW (g_win, title);
-}
-
-LRESULT CALLBACK ChainPanelProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
-{
-    switch (msg)
-    {
-        case WM_COMMAND:
-        case WM_HSCROLL:
-            return SendMessageW (g_win, msg, wp, lp);
-        case WM_VSCROLL:
-        {
-            RECT rc {};
-            GetClientRect (hwnd, &rc);
-            const int page = (int) (rc.bottom - rc.top);
-            int y = g_scroll;
-            switch (LOWORD (wp))
-            {
-                case SB_LINEUP: y -= kRowH / 2; break;
-                case SB_LINEDOWN: y += kRowH / 2; break;
-                case SB_PAGEUP: y -= page; break;
-                case SB_PAGEDOWN: y += page; break;
-                case SB_THUMBTRACK: y = HIWORD (wp); break;
-                default: return 0;
-            }
-            g_scroll = y;
-            LayoutRows();
-            return 0;
-        }
-        case WM_MOUSEWHEEL:
-            g_scroll -= (int) (GET_WHEEL_DELTA_WPARAM (wp) / 120.0f * kRowH);
-            LayoutRows();
-            return 0;
-    }
-    return DefWindowProcW (hwnd, msg, wp, lp);
-}
-
-// --- Drag & drop reordering ---------------------------------------------------
-bool IsDraggedKey (const std::string& key)
-{
-    if (g_dragKind == 1) return key == g_dragKey;
-    if (g_dragKind == 2 && g_dragBlock >= 0 && g_dragBlock < (int) g_edit.blocks.size())
-        for (const auto& k : g_edit.blocks[(size_t) g_dragBlock].filters)
-            if (k == key) return true;
-    return false;
-}
-
-// From a content-space Y, find where the drop lands: the key that would
-// end up right after the dragged item(s), and the block the drop is
-// inside of (by name), if any.
-void ComputeInsertion (int contentY, std::string& beforeKey, std::wstring& insideBlockName)
-{
-    beforeKey.clear();
-    insideBlockName.clear();
-    size_t idx = g_items.size();
-    for (size_t i = 0; i < g_items.size(); ++i)
-        if (contentY < g_items[i].top + g_items[i].height / 2) { idx = i; break; }
-    for (size_t i = idx; i < g_items.size(); ++i)
-        if (!g_items[i].header && !IsDraggedKey (g_items[i].key)) { beforeKey = g_items[i].key; break; }
-    std::string prevKey;
-    for (long i = (long) idx - 1; i >= 0; --i)
-        if (!g_items[(size_t) i].header && !IsDraggedKey (g_items[(size_t) i].key)) { prevKey = g_items[(size_t) i].key; break; }
-    const int prevBlock = BlockOf (prevKey);
-    const int nextBlock = BlockOf (beforeKey);
-    if (!beforeKey.empty() && prevBlock >= 0 && prevBlock == nextBlock)
-        insideBlockName = g_edit.blocks[(size_t) prevBlock].name;
-    else if (idx > 0 && idx <= g_items.size() && g_items[idx - 1].header && nextBlock >= 0 &&
-             g_items[idx - 1].blockIdx == nextBlock)
-        insideBlockName = g_edit.blocks[(size_t) nextBlock].name;
-}
-
-void ShowDragIndicator (int contentY)
-{
-    size_t idx = g_items.size();
-    for (size_t i = 0; i < g_items.size(); ++i)
-        if (contentY < g_items[i].top + g_items[i].height / 2) { idx = i; break; }
-    const int top = idx < g_items.size() ? g_items[idx].top : ContentHeight();
-    SetWindowPos (g_frame, nullptr, 2, top - g_scroll, 744, 3, SWP_NOZORDER | SWP_SHOWWINDOW);
-}
-
-void ApplyDragDrop()
-{
-    if (g_editLocked) return;
-    std::string beforeKey;
-    std::wstring insideName;
-    ComputeInsertion (g_dragPanelY + g_scroll, beforeKey, insideName);
-
-    auto insertPos = [&] (std::vector<std::string>& ord) {
-        if (beforeKey.empty()) return ord.end();
-        return std::find (ord.begin(), ord.end(), beforeKey);
-    };
-
-    if (g_dragKind == 1)
-    {
-        const std::string key = g_dragKey;
-        // Leave the old block (drop it if it becomes empty).
-        const int oldBlock = BlockOf (key);
-        if (oldBlock >= 0)
-        {
-            auto& f = g_edit.blocks[(size_t) oldBlock].filters;
-            f.erase (std::remove (f.begin(), f.end(), key), f.end());
-            if (f.empty()) g_edit.blocks.erase (g_edit.blocks.begin() + oldBlock);
-        }
-        auto& ord = g_edit.order;
-        ord.erase (std::remove (ord.begin(), ord.end(), key), ord.end());
-        ord.insert (insertPos (ord), key);
-        // Join the block the drop landed inside of.
-        if (!insideName.empty())
-        {
-            for (auto& blk : g_edit.blocks)
-                if (blk.name == insideName)
-                {
-                    blk.filters.push_back (key);
-                    std::sort (blk.filters.begin(), blk.filters.end(),
-                               [&] (const std::string& a, const std::string& b) {
-                                   return std::find (ord.begin(), ord.end(), a) <
-                                          std::find (ord.begin(), ord.end(), b);
-                               });
-                    break;
-                }
-        }
-        g_selKey = key;
-    }
-    else if (g_dragKind == 2 && g_dragBlock >= 0 && g_dragBlock < (int) g_edit.blocks.size())
-    {
-        const std::vector<std::string> chunk = g_edit.blocks[(size_t) g_dragBlock].filters;
-        auto& ord = g_edit.order;
-        for (const auto& k : chunk)
-            ord.erase (std::remove (ord.begin(), ord.end(), k), ord.end());
-        ord.insert (insertPos (ord), chunk.begin(), chunk.end());
-    }
-    Commit();
-    RefreshChain();
-}
-
-int PanelYFromCursor (HWND hwnd)
-{
-    POINT pt {};
-    GetCursorPos (&pt);
-    ScreenToClient (g_panel, &pt);
-    (void) hwnd;
-    return pt.y;
-}
-
-LRESULT CALLBACK DragSubclassProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
-                                   UINT_PTR idSubclass, DWORD_PTR refData)
-{
-    switch (msg)
-    {
-        case WM_LBUTTONDOWN:
-            g_dragHwnd = hwnd;
-            g_dragRef = refData;
-            g_dragging = false;
-            g_dragPanelY = PanelYFromCursor (hwnd);
-            g_dragStartPanelY = g_dragPanelY;
-            SetCapture (hwnd);
-            return DefSubclassProc (hwnd, msg, wp, lp);
-        case WM_MOUSEMOVE:
-            if (g_dragHwnd == hwnd && (wp & MK_LBUTTON))
-            {
-                g_dragPanelY = PanelYFromCursor (hwnd);
-                if (!g_dragging && std::abs (g_dragPanelY - g_dragStartPanelY) > 7)
-                {
-                    g_dragging = true;
-                    if (refData < 1000)
-                    {
-                        g_dragKind = 1;
-                        g_dragKey = kSlotKeys[refData];
-                    }
-                    else
-                    {
-                        g_dragKind = 2;
-                        const int pool = (int) refData - 1000;
-                        g_dragBlock = (pool >= 0 && pool < kMaxHeaderPool) ? g_headers[pool].blockIdx : -1;
-                    }
-                }
-                if (g_dragging) ShowDragIndicator (g_dragPanelY + g_scroll);
-            }
-            return DefSubclassProc (hwnd, msg, wp, lp);
-        case WM_LBUTTONUP:
-            if (g_dragHwnd == hwnd)
-            {
-                const bool wasDragging = g_dragging;
-                g_dragHwnd = nullptr;
-                g_dragging = false;
-                ReleaseCapture();
-                if (wasDragging)
-                {
-                    g_dragPanelY = PanelYFromCursor (hwnd);
-                    ApplyDragDrop();
-                    g_dragKind = 0;
-                    return 0; // swallow the click
-                }
-            }
-            return DefSubclassProc (hwnd, msg, wp, lp);
-        case WM_NCDESTROY:
-            RemoveWindowSubclass (hwnd, DragSubclassProc, idSubclass);
-            return DefSubclassProc (hwnd, msg, wp, lp);
-    }
-    return DefSubclassProc (hwnd, msg, wp, lp);
-}
-
-void CreateChainRows (HWND panel)
-{
-    auto mk = [&] (const wchar_t* cls, const wchar_t* text, DWORD style, int id) {
-        HWND h = CreateWindowW (cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 10, 10,
-                                panel, reinterpret_cast<HMENU> ((INT_PTR) id), nullptr, nullptr);
-        SendMessageW (h, WM_SETFONT, (WPARAM) g_font, TRUE);
-        return h;
-    };
-    g_frame = mk (L"STATIC", L"", SS_BLACKFRAME, 0);
-    for (int s = 0; s < kNumSlots; ++s)
-    {
-        RowControls& r = g_rows[s];
-        const std::string key = kSlotKeys[s];
-        r.toggle = mk (L"BUTTON", L"", WS_TABSTOP | BS_AUTOCHECKBOX | BS_PUSHLIKE, RowId (s, 2));
-        SetWindowSubclass (r.toggle, DragSubclassProc, 0, (DWORD_PTR) s);
-        if (key == "gate")
-            r.breath = mk (L"BUTTON", L"", WS_TABSTOP | BS_AUTOCHECKBOX | BS_PUSHLIKE, RowId (s, 3));
-        for (int i = 0; i < kNumKnobs && r.knobCount < 3; ++i)
-        {
-            if (kKnobs[i].filterKey != key) continue;
-            const int j = r.knobCount++;
-            r.knobs[j] = &kKnobs[i];
-            r.knobLabel[j] = mk (L"STATIC", L"", 0, 0);
-            r.knobSlider[j] = mk (TRACKBAR_CLASSW, L"", WS_TABSTOP | TBS_NOTICKS, RowId (s, 4 + j));
-            SendMessageW (r.knobSlider[j], TBM_SETRANGE, TRUE, MAKELPARAM (0, 1000));
-            SendMessageW (r.knobSlider[j], TBM_SETPAGESIZE, 0, 50);
-        }
-    }
-    for (int i = 0; i < kMaxHeaderPool; ++i)
-    {
-        HeaderControls& h = g_headers[i];
-        h.nameBtn = mk (L"BUTTON", L"", WS_TABSTOP, HB_BASE + i * 3 + 0);
-        SetWindowSubclass (h.nameBtn, DragSubclassProc, 0, (DWORD_PTR) (1000 + i));
-        h.collapseBtn = mk (L"BUTTON", L"", WS_TABSTOP, HB_BASE + i * 3 + 1);
-        h.dissolveBtn = mk (L"BUTTON", L"解散", WS_TABSTOP, HB_BASE + i * 3 + 2);
-        ShowWindow (h.nameBtn, SW_HIDE);
-        ShowWindow (h.collapseBtn, SW_HIDE);
-        ShowWindow (h.dissolveBtn, SW_HIDE);
-    }
 }
 
 // --- Actions ------------------------------------------------------------------
@@ -722,12 +1127,13 @@ void OnPresetNew()
     Preset np = DefaultPreset(); // new presets always start from 標準
     np.name = name;
     SavePreset (np);
-    RefreshPresetList (name);
+    RefreshPresetCombo (name);
     LoadIntoEditor (name);
 }
 
 void OnPresetRename()
 {
+    if (g_editLocked) return;
     std::wstring name;
     if (!PromptText (g_win, L"プリセット名の変更", g_edit.name, name)) return;
     if (name == g_edit.name) return;
@@ -747,36 +1153,31 @@ void OnPresetRename()
         g_mainCurrent = name;
         NotifyMainSelect (name);
     }
-    RefreshPresetList (name);
+    RefreshPresetCombo (name);
     LoadIntoEditor (name);
 }
 
 void OnPresetDelete()
 {
-    if (ListPresetNames().size() <= 1)
-    {
-        MessageBoxW (g_win, L"最後の1個は消せません", L"MicFilter", MB_OK | MB_ICONINFORMATION);
-        return;
-    }
+    if (g_editLocked) return;
     if (MessageBoxW (g_win, L"このプリセットを削除しますか？", L"MicFilter",
                      MB_YESNO | MB_ICONQUESTION) != IDYES)
         return;
     const bool wasMain = g_editIsMainCurrent;
     DeletePreset (g_edit.name);
-    const std::vector<std::wstring> names = ListPresetNames();
-    const std::wstring next = names.empty() ? std::wstring (L"標準") : names[0];
-    if (names.empty()) SavePreset (DefaultPreset());
+    const std::wstring next = L"標準";
     if (wasMain)
     {
         g_mainCurrent = next;
         NotifyMainSelect (next);
     }
-    RefreshPresetList (next);
+    RefreshPresetCombo (next);
     LoadIntoEditor (next);
 }
 
 void OnBlockCreate()
 {
+    if (g_editLocked) return;
     if (BlockOf (g_selKey) >= 0)
     {
         MessageBoxW (g_win, L"選択中のフィルターはすでにブロックの中です", L"MicFilter",
@@ -790,75 +1191,7 @@ void OnBlockCreate()
     blk.filters = { g_selKey };
     g_edit.blocks.push_back (blk);
     Commit();
-    RefreshChain();
-}
-
-void OnBlockRename (int pool)
-{
-    const int b = g_headers[pool].blockIdx;
-    if (b < 0 || b >= (int) g_edit.blocks.size()) return;
-    std::wstring name;
-    if (!PromptText (g_win, L"ブロック名の変更", g_edit.blocks[(size_t) b].name, name)) return;
-    g_edit.blocks[(size_t) b].name = name;
-    Commit();
-    LayoutRows();
-}
-
-void OnBlockCollapse (int pool)
-{
-    const int b = g_headers[pool].blockIdx;
-    if (b < 0 || b >= (int) g_edit.blocks.size()) return;
-    g_edit.blocks[(size_t) b].collapsed = !g_edit.blocks[(size_t) b].collapsed;
-    Commit();
-    LayoutRows();
-}
-
-void OnBlockDissolve (int pool)
-{
-    const int b = g_headers[pool].blockIdx;
-    if (b < 0 || b >= (int) g_edit.blocks.size()) return;
-    g_edit.blocks.erase (g_edit.blocks.begin() + b);
-    Commit();
-    RefreshChain();
-}
-
-void OnRowToggle (int slot)
-{
-    const std::string key = kSlotKeys[slot];
-    const bool on = SendMessageW (g_rows[slot].toggle, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    g_edit.on[key] = on;
-    g_selKey = key;
-    const FilterInfo* info = FindFilter (key);
-    SetToggleText (g_rows[slot].toggle, on, info ? info->label : L"?");
-    LayoutRows();
-    Commit();
-}
-
-void OnBreathToggle()
-{
-    const int s = SlotOf ("gate");
-    const bool on = SendMessageW (g_rows[s].breath, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    g_edit.on["breath"] = on;
-    g_selKey = "gate";
-    SetToggleText (g_rows[s].breath, on, L"吐息キープ");
-    LayoutRows();
-    Commit();
-}
-
-void OnKnob (HWND sliderHwnd, int slot, int j)
-{
-    RowControls& r = g_rows[slot];
-    const KnobDef& def = *r.knobs[j];
-    const auto& range = MicFilterParams::rangeFor (def.paramId);
-    const int pos = (int) SendMessageW (sliderHwnd, TBM_GETPOS, 0, 0);
-    double plain = range.min + (range.max - range.min) * (pos / 1000.0);
-    plain = std::round ((plain - range.min) / def.step) * def.step + range.min;
-    plain = std::clamp (plain, (double) range.min, (double) range.max);
-    if (plain == KnobValue (def)) return;
-    g_edit.values[def.valueKey] = plain;
-    SetWindowTextW (r.knobLabel[j], KnobValueText (def, plain).c_str());
-    g_selKey = kSlotKeys[slot];
-    Commit();
+    RefreshBoard();
 }
 
 LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -880,41 +1213,32 @@ LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                             reinterpret_cast<HMENU> ((INT_PTR) id), nullptr, nullptr));
             };
 
-            label (L"プリセット", 16, 10, 180);
-            make (CreateWindowW (L"LISTBOX", L"",
-                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | LBS_NOTIFY | WS_VSCROLL,
-                                 16, 32, 180, 478, hwnd,
-                                 reinterpret_cast<HMENU> ((INT_PTR) S_PRESET_LIST), nullptr, nullptr));
-            button (L"新規", S_PRESET_NEW, 16, 518, 54);
-            button (L"名前変更", S_PRESET_RENAME, 74, 518, 68);
-            button (L"削除", S_PRESET_DELETE, 146, 518, 50);
+            label (L"プリセット", 16, 13, 64);
+            make (CreateWindowW (L"COMBOBOX", L"",
+                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                 84, 9, 250, 200, hwnd,
+                                 reinterpret_cast<HMENU> ((INT_PTR) S_PRESET_COMBO), nullptr, nullptr));
+            make (CreateWindowW (L"STATIC", L"", WS_CHILD | WS_VISIBLE, 342, 13, 110, 20,
+                                 hwnd, reinterpret_cast<HMENU> ((INT_PTR) S_LOCK_LABEL),
+                                 nullptr, nullptr));
+            button (L"新規", S_PRESET_NEW, 470, 8, 54, 25);
+            button (L"名前変更", S_PRESET_RENAME, 528, 8, 68, 25);
+            button (L"削除", S_PRESET_DELETE, 600, 8, 50, 25);
 
-            label (L"並び順ブロック（フィルターのボタン／ブロック名をドラッグで移動）", 212, 10, 500);
-            button (L"選択行からブロック作成", S_BLOCK_CREATE, 746, 8, 168, 25);
+            button (L"選択カードからブロック作成", S_BLOCK_CREATE, 16, 42, 180, 25);
+            label (L"カードはドラッグで並び替え／ノブは縦ドラッグ・ホイールで調整、ダブルクリックで初期値",
+                   208, 45, 760);
 
-            static bool panelRegistered = false;
-            if (!panelRegistered)
-            {
-                WNDCLASSW wc {};
-                wc.lpfnWndProc = ChainPanelProc;
-                wc.hInstance = GetModuleHandleW (nullptr);
-                wc.hCursor = LoadCursorW (nullptr, IDC_ARROW);
-                wc.hbrBackground = (HBRUSH) (COLOR_WINDOW + 1);
-                wc.lpszClassName = L"MicFilterChainPanel";
-                RegisterClassW (&wc);
-                panelRegistered = true;
-            }
-            g_panel = CreateWindowW (L"MicFilterChainPanel", L"",
-                                     WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL,
-                                     212, 40, 764, 570, hwnd, nullptr,
+            g_board = CreateWindowW (L"MicFilterBoard", L"",
+                                     WS_CHILD | WS_VISIBLE | WS_BORDER,
+                                     16, 74, 952, 538, hwnd, nullptr,
                                      GetModuleHandleW (nullptr), nullptr);
-            CreateChainRows (g_panel);
 
             button (L"このプリセットを使う", S_APPLY, 664, 622, 150, 30);
             button (L"閉じる", S_CLOSE, 828, 622, 140, 30);
 
             EnsurePresetStore();
-            RefreshPresetList (g_mainCurrent);
+            RefreshPresetCombo (g_mainCurrent);
             const std::wstring sel = SelectedPresetName();
             LoadIntoEditor (!sel.empty() ? sel : g_mainCurrent);
             return 0;
@@ -922,27 +1246,10 @@ LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case WM_COMMAND:
         {
             const int id = LOWORD (wp);
-            if (id >= HB_BASE && id < HB_BASE + kMaxHeaderPool * 3)
-            {
-                const int pool = (id - HB_BASE) / 3;
-                const int sub = (id - HB_BASE) % 3;
-                if (sub == 0) { OnBlockRename (pool); return 0; }
-                if (sub == 1) { OnBlockCollapse (pool); return 0; }
-                if (sub == 2) { OnBlockDissolve (pool); return 0; }
-                return 0;
-            }
-            if (id >= R_BASE && id < R_BASE + kNumSlots * 16)
-            {
-                const int slot = (id - R_BASE) / 16;
-                const int sub = (id - R_BASE) % 16;
-                if (sub == 2) { OnRowToggle (slot); return 0; }
-                if (sub == 3) { OnBreathToggle(); return 0; }
-                return 0;
-            }
             switch (id)
             {
-                case S_PRESET_LIST:
-                    if (HIWORD (wp) == LBN_SELCHANGE)
+                case S_PRESET_COMBO:
+                    if (HIWORD (wp) == CBN_SELCHANGE)
                     {
                         const std::wstring name = SelectedPresetName();
                         if (!name.empty() && name != g_edit.name) LoadIntoEditor (name);
@@ -961,28 +1268,12 @@ LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             break;
         }
-        case WM_HSCROLL:
-        {
-            const int code = LOWORD (wp);
-            if (code != TB_THUMBTRACK && code != TB_ENDTRACK && code != SB_LINELEFT &&
-                code != SB_LINERIGHT && code != SB_PAGELEFT && code != SB_PAGERIGHT)
-                return 0;
-            HWND slider = reinterpret_cast<HWND> (lp);
-            const int id = GetDlgCtrlID (slider);
-            if (id >= R_BASE && id < R_BASE + kNumSlots * 16)
-            {
-                const int slot = (id - R_BASE) / 16;
-                const int sub = (id - R_BASE) % 16;
-                if (sub >= 4) OnKnob (slider, slot, sub - 4);
-            }
-            return 0;
-        }
         case WM_CLOSE:
             DestroyWindow (hwnd);
             return 0;
         case WM_DESTROY:
             g_win = nullptr;
-            g_panel = nullptr;
+            g_board = nullptr;
             return 0;
     }
     return DefWindowProcW (hwnd, msg, wp, lp);
@@ -999,9 +1290,12 @@ void OpenSettingsWindow (HWND parent, const std::wstring& mainCurrentPreset)
     g_parent = parent;
     g_mainCurrent = mainCurrentPreset;
     static bool registered = false;
+    static ULONG_PTR gdiplusToken = 0;
     HINSTANCE hInst = GetModuleHandleW (nullptr);
     if (!registered)
     {
+        Gdiplus::GdiplusStartupInput gdiInput;
+        Gdiplus::GdiplusStartup (&gdiplusToken, &gdiInput, nullptr);
         WNDCLASSW wc {};
         wc.lpfnWndProc = SettingsProc;
         wc.hInstance = hInst;
@@ -1009,11 +1303,19 @@ void OpenSettingsWindow (HWND parent, const std::wstring& mainCurrentPreset)
         wc.hbrBackground = (HBRUSH) (COLOR_BTNFACE + 1);
         wc.lpszClassName = L"MicFilterSettingsWindow";
         RegisterClassW (&wc);
+        WNDCLASSW bc {};
+        bc.lpfnWndProc = BoardProc;
+        bc.hInstance = hInst;
+        bc.hCursor = LoadCursorW (nullptr, IDC_ARROW);
+        bc.hbrBackground = nullptr;
+        bc.style = CS_DBLCLKS;
+        bc.lpszClassName = L"MicFilterBoard";
+        RegisterClassW (&bc);
         registered = true;
     }
     INITCOMMONCONTROLSEX icc { sizeof (icc), ICC_WIN95_CLASSES };
     InitCommonControlsEx (&icc);
-    g_scroll = 0;
+    g_boardScroll = 0;
     HWND win = CreateWindowW (L"MicFilterSettingsWindow", L"フィルター設定",
                               WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                               CW_USEDEFAULT, CW_USEDEFAULT, 1000, 700,
