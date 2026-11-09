@@ -1,0 +1,25 @@
+# Build outputs
+**/build/
+**/build-mingw/
+*.o
+*.obj
+
+# VST3 SDK: clone separately (or let CMake FetchContent fetch it)
+vst3/vst3sdk/
+
+# RNNoise generated model data: fetch with thirdparty/rnnoise/download_model.sh
+# (official tarball, sha256-verified). Do not commit the generated files.
+thirdparty/rnnoise/.git/
+thirdparty/rnnoise/*.tar.gz
+thirdparty/rnnoise/models/
+thirdparty/rnnoise/src/rnnoise_data.c
+thirdparty/rnnoise/src/rnnoise_data.h
+thirdparty/rnnoise/src/rnnoise_data_little.c
+thirdparty/rnnoise/src/rnnoise_data_little.h
+
+# Distribution packages (attach to GitHub Releases instead)
+dist/*.zip
+dist/MicFilter-v*-windows/
+
+# Runtime logs
+*.log
