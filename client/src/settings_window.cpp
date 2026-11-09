@@ -89,6 +89,7 @@ int g_dragBlock = -1;
 std::wstring g_mainCurrent;
 Preset g_edit;
 bool g_editIsMainCurrent = false;
+bool g_editLocked = false; // protected built-in preset (標準 / AIプリセット)
 std::string g_selKey = "gate"; // selected row (for group moves)
 int g_scroll = 0;
 HFONT g_font = nullptr;
@@ -106,6 +107,7 @@ int RowId (int slot, int sub) { return R_BASE + slot * 16 + sub; }
 
 void Commit()
 {
+    if (g_editLocked) return; // protected presets never change
     SavePreset (g_edit);
     if (g_editIsMainCurrent && g_parent)
         PostMessageW (g_parent, WM_PRESET_CHANGED, 0, 0);
@@ -428,17 +430,41 @@ std::wstring SelectedPresetName()
     return buf;
 }
 
+void ApplyLockState()
+{
+    const BOOL en = g_editLocked ? FALSE : TRUE;
+    EnableWindow (SCtl (S_PRESET_RENAME), en);
+    EnableWindow (SCtl (S_PRESET_DELETE), en);
+    EnableWindow (SCtl (S_BLOCK_CREATE), en);
+    for (int s = 0; s < kNumSlots; ++s)
+    {
+        RowControls& r = g_rows[s];
+        EnableWindow (r.toggle, en);
+        if (r.breath) EnableWindow (r.breath, en);
+        for (int j = 0; j < r.knobCount; ++j) EnableWindow (r.knobSlider[j], en);
+    }
+    for (int i = 0; i < kMaxHeaderPool; ++i)
+    {
+        EnableWindow (g_headers[i].nameBtn, en);
+        EnableWindow (g_headers[i].collapseBtn, en);
+        EnableWindow (g_headers[i].dissolveBtn, en);
+    }
+}
+
 void LoadIntoEditor (const std::wstring& name)
 {
     Preset p;
     if (!LoadPreset (name, p)) p = DefaultPreset();
     g_edit = p;
     g_editIsMainCurrent = g_edit.name == g_mainCurrent;
+    g_editLocked = IsProtectedPreset (g_edit.name);
     g_selKey = "gate";
     g_scroll = 0;
     RefreshChain();
-    wchar_t title[320];
-    swprintf_s (title, L"フィルター設定 - %s", g_edit.name.c_str());
+    ApplyLockState();
+    wchar_t title[340];
+    swprintf_s (title, g_editLocked ? L"フィルター設定 - %s（変更不可）" : L"フィルター設定 - %s",
+                g_edit.name.c_str());
     SetWindowTextW (g_win, title);
 }
 
@@ -521,6 +547,7 @@ void ShowDragIndicator (int contentY)
 
 void ApplyDragDrop()
 {
+    if (g_editLocked) return;
     std::string beforeKey;
     std::wstring insideName;
     ComputeInsertion (g_dragPanelY + g_scroll, beforeKey, insideName);
@@ -685,14 +712,14 @@ void CreateChainRows (HWND panel)
 void OnPresetNew()
 {
     std::wstring name;
-    if (!PromptText (g_win, L"新規プリセット", L"", name)) return;
+    if (!PromptText (g_win, L"新規プリセット（標準のコピー）", L"", name)) return;
     for (const auto& n : ListPresetNames())
         if (n == name)
         {
             MessageBoxW (g_win, L"同じ名前のプリセットがあります", L"MicFilter", MB_OK | MB_ICONWARNING);
             return;
         }
-    Preset np = g_edit;
+    Preset np = DefaultPreset(); // new presets always start from 標準
     np.name = name;
     SavePreset (np);
     RefreshPresetList (name);

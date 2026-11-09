@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(MicFilter VERSION 0.18.0 LANGUAGES C CXX)
+project(MicFilter VERSION 0.19.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

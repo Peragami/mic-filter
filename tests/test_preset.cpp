@@ -89,6 +89,15 @@ int main()
         CHECK (Normalized (scattered).blocks.empty()); // not consecutive -> dropped
     }
 
+    // Built-in presets: valid, protected by name.
+    CHECK (PresetIsValid (BuiltinAiPreset()));
+    CHECK (BuiltinAiPreset().name == L"AIプリセット");
+    CHECK (BuiltinAiPreset().on.at ("rnnoise") == true);
+    CHECK (BuiltinAiPreset().on.at ("bwe") == true);
+    CHECK (IsProtectedPreset (L"標準"));
+    CHECK (IsProtectedPreset (L"AIプリセット"));
+    CHECK (!IsProtectedPreset (L"配信テスト"));
+
     // Garbage is rejected by the parser.
     Preset dummy;
     CHECK (!ParsePreset ("not json at all", dummy));

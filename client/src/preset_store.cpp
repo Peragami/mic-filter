@@ -70,14 +70,24 @@ bool WriteFileUtf8 (const std::wstring& path, const std::string& data)
 }
 } // namespace
 
+namespace
+{
+bool WritePresetRaw (const Preset& p)
+{
+    CreateDirectoryW (PresetsDir().c_str(), nullptr);
+    const bool ok = WriteFileUtf8 (PresetPath (p.name), SerializePreset (p));
+    miclog::Write ("preset: save '%s' -> %d", WideToUtf8 (p.name).c_str(), ok ? 1 : 0);
+    return ok;
+}
+} // namespace
+
 void EnsurePresetStore()
 {
     CreateDirectoryW (PresetsDir().c_str(), nullptr);
-    if (ListPresetNames().empty())
-    {
-        SavePreset (DefaultPreset());
-        miclog::Write ("preset: created presets folder with the default preset");
-    }
+    // Built-in presets are canonical: always (re)write them so the
+    // read-only pair is present and pristine.
+    WritePresetRaw (DefaultPreset());
+    WritePresetRaw (BuiltinAiPreset());
 }
 
 std::vector<std::wstring> ListPresetNames()
@@ -112,13 +122,16 @@ bool LoadPreset (const std::wstring& name, Preset& out)
 
 bool SavePreset (const Preset& p)
 {
-    CreateDirectoryW (PresetsDir().c_str(), nullptr);
-    const bool ok = WriteFileUtf8 (PresetPath (p.name), SerializePreset (p));
-    miclog::Write ("preset: save '%s' -> %d", WideToUtf8 (p.name).c_str(), ok ? 1 : 0);
-    return ok;
+    if (IsProtectedPreset (p.name))
+    {
+        miclog::Write ("preset: save refused (protected) '%s'", WideToUtf8 (p.name).c_str());
+        return false;
+    }
+    return WritePresetRaw (p);
 }
 
 bool DeletePreset (const std::wstring& name)
 {
+    if (IsProtectedPreset (name)) return false;
     return DeleteFileW (PresetPath (name).c_str()) != 0;
 }

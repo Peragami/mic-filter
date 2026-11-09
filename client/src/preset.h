@@ -107,6 +107,14 @@ struct Preset
 };
 
 Preset DefaultPreset();
+// The built-in AI preset (RNNoise + bandwidth extension on).
+Preset BuiltinAiPreset();
+// Built-in presets are read-only in the app: the store re-writes them
+// with canonical content on startup and refuses to save/delete them.
+inline bool IsProtectedPreset (const std::wstring& name)
+{
+    return name == L"標準" || name == L"AIプリセット";
+}
 // Repair a parsed preset: unknown keys dropped, missing keys filled
 // with defaults, order made a permutation.
 Preset Normalized (Preset p);

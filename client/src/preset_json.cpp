@@ -206,6 +206,17 @@ Preset DefaultPreset()
     return p;
 }
 
+Preset BuiltinAiPreset()
+{
+    Preset p = DefaultPreset();
+    p.name = L"AIプリセット";
+    p.on["rnnoise"] = true;
+    p.on["bwe"] = true;
+    p.on["spectral"] = false;  // RNNoise covers it
+    p.on["multiband"] = false; // RNNoise covers it
+    return p;
+}
+
 Preset Normalized (Preset p)
 {
     // on: drop unknown, fill missing with defaults.

@@ -1,6 +1,6 @@
 {
-  "version": "0.18.0",
-  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.18.0.zip",
-  "sha256": "fa00c29b0d30dbe333775cf602b5dc09d1db198696407b50d82342c2779f5f28",
-  "notes": "グループ機能を削除（並び順ブロックはそのまま）。設定ウィンドウがシンプルに"
+  "version": "0.19.0",
+  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.19.0.zip",
+  "sha256": "527651e5edead610406ace993432bc8e5c42da652f54ad7170640c1ccc0998a8",
+  "notes": "標準とAIプリセットを変更不可に。新規プリセットは標準と同じ設定から作成"
 }
