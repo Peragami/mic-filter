@@ -1,6 +1,6 @@
 {
-  "version": "0.14.0",
-  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.14.0.zip",
-  "sha256": "aac938b768ae542f380c912777dd06dc6b2412daa2cb2afe29c53d82cd83afdd",
-  "notes": "プリセット制に刷新：メインはプリセット選択のみ、設定ウィンドウでプリセット/グループ/順番を編集、exe横のpresetsフォルダに保存"
+  "version": "0.15.0",
+  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.15.0.zip",
+  "sha256": "efa0d54e559816598661701e7c9feea8abc302a46f83b5483f05a95091e49744",
+  "notes": "順番リストはONのフィルターだけ表示に変更"
 }

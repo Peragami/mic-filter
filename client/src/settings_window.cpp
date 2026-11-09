@@ -212,13 +212,21 @@ void RefreshGroups()
 
 void RefreshOrder()
 {
+    // Only stages that are ON in this preset are listed; the stored
+    // order keeps every stage, so turning one back on restores its
+    // place. Each item carries its index into g_edit.order.
     HWND lb = SCtl (S_ORDER_LIST);
     SendMessageW (lb, LB_RESETCONTENT, 0, 0);
-    for (const auto& key : g_edit.order)
+    for (size_t i = 0; i < g_edit.order.size(); ++i)
     {
+        const std::string& key = g_edit.order[i];
+        const auto it = g_edit.on.find (key);
+        if (it == g_edit.on.end() || !it->second) continue;
         std::wstring text = StageLabel (key);
         if (key == "gate") text += L"（吐息キープもここ）";
-        SendMessageW (lb, LB_ADDSTRING, 0, reinterpret_cast<LPARAM> (text.c_str()));
+        const LRESULT idx = SendMessageW (lb, LB_ADDSTRING, 0,
+                                          reinterpret_cast<LPARAM> (text.c_str()));
+        SendMessageW (lb, LB_SETITEMDATA, idx, (LPARAM) i);
     }
 }
 
@@ -390,9 +398,14 @@ void OnOrderMove (int delta)
     HWND lb = SCtl (S_ORDER_LIST);
     const LRESULT sel = SendMessageW (lb, LB_GETCURSEL, 0, 0);
     if (sel == LB_ERR) return;
-    const int next = (int) sel + delta;
-    if (next < 0 || next >= (int) g_edit.order.size()) return;
-    std::swap (g_edit.order[(size_t) sel], g_edit.order[(size_t) next]);
+    const LRESULT next = sel + delta;
+    const LRESULT count = SendMessageW (lb, LB_GETCOUNT, 0, 0);
+    if (next < 0 || next >= count) return;
+    // Swap the two visible neighbours in the stored order (hidden OFF
+    // stages between them keep their places).
+    const size_t a = (size_t) SendMessageW (lb, LB_GETITEMDATA, sel, 0);
+    const size_t b = (size_t) SendMessageW (lb, LB_GETITEMDATA, next, 0);
+    std::swap (g_edit.order[a], g_edit.order[b]);
     Commit();
     RefreshOrder();
     SendMessageW (lb, LB_SETCURSEL, next, 0);
@@ -405,6 +418,7 @@ void OnSetGroupAll (bool on)
         g_edit.on[key] = on;
     Commit();
     RefreshFilters();
+    RefreshOrder();
 }
 
 LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -470,7 +484,7 @@ LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             (void) mc;
             button (L"移動", S_MOVE_BUTTON, 418, 566, 70, 24);
 
-            label (L"フィルターのかける順番", 548, 10, 328);
+            label (L"かける順番（ONのフィルターだけ表示）", 548, 10, 328);
             listbox (S_ORDER_LIST, 548, 32, 328, 430);
             button (L"↑ 上へ", S_ORDER_UP, 548, 470, 80);
             button (L"↓ 下へ", S_ORDER_DOWN, 632, 470, 80);
@@ -540,6 +554,7 @@ LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     const std::string key = kFilterRegistry[item.lParam].key;
                     g_edit.on[key] = ListView_GetCheckState (nm->hwndFrom, nlv->iItem) != 0;
                     Commit();
+                    RefreshOrder();
                 }
             }
             return 0;
