@@ -84,3 +84,6 @@ Windowsマイクレベルの自動設定は **VST側ではなくクライアン�
 - 未確認: VS2022 (MSVC) でのビルド、Windows 実機での実行全般。
   MSVC 固有の差異が出るとすれば `/utf-8` 前提の日本語リテラルと
   `swprintf_s` 等の CRT 関数のみで、コード側は標準範囲に収めてある。
+
+## 自動更新（v0.10〜）
+起動時に GitHub リポジトリの `dist/update/latest.json`（raw.githubusercontent.com 経由）を確認し、新しいバージョンがあればユーザーに尋ねてから更新する。「更新を確認」ボタンで手動確認も可能。ダウンロードしたクライアント専用 zip は SHA-256 で検証し、システムの tar.exe で解凍、補助 .bat がプロセス終了を待って exe を入れ替えて再起動する。判定・パースの純ロジックは `src/update_check.h`（テスト: tests/test_update_check.cpp）、通信と適用は `src/updater.cpp`。更新対象は MicFilterClient.exe 本体のみ（VST 版は対象外、DSP は exe 内蔵のため追随する）。配布側の手順：新バージョンのクライアント zip を `dist/update/MicFilterClient-vX.Y.Z.zip` に置き、sha256 を計算して `latest.json` を更新して push する。

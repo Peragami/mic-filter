@@ -19,6 +19,8 @@
 
 #include "passive_calibration.h"
 #include "log.h"
+#include "updater.h"
+#include "vst3/source/version.h" // STRING_VERSION
 #include "mic_level.h"
 #include "ui_shared.h"
 #include "vst3/source/paramids.h" // MicFilterParams::ParamID (shared with the plugin)
@@ -301,12 +303,54 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 g_notificationClient = new DeviceNotificationClient (hwnd);
                 g_deviceEnumerator->RegisterEndpointNotificationCallback (g_notificationClient);
             }
+            {
+                wchar_t vbuf[64];
+                swprintf_s (vbuf, L"バージョン %hs", STRING_VERSION);
+                AddLabel (hwnd, vbuf, 16, 620, 200);
+                make (CreateWindowW (L"BUTTON", L"更新を確認", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                     366, 616, 120, 26, hwnd,
+                                     reinterpret_cast<HMENU> ((INT_PTR) IDC_UPDATE_BUTTON),
+                                     nullptr, nullptr));
+            }
             SetTimer (hwnd, kTimerId, 50, nullptr);
+            CheckForUpdateAsync (hwnd, false); // silent auto-check on launch
             return 0;
         }
         case WM_DEVICECHANGE_MSG:
             miclog::Write ("app: audio device change notification");
             ReenumerateDevices (hwnd);
+            return 0;
+        case WM_UPDATE_AVAILABLE:
+        {
+            auto* offer = reinterpret_cast<UpdateOffer*> (lp);
+            wchar_t buf[1024];
+            const std::wstring ver = Utf8ToWide (offer->info.version);
+            const std::wstring notes = Utf8ToWide (offer->info.notes);
+            swprintf_s (buf, L"新しいバージョン %s があります。\n%s\n\n今すぐ更新しますか？（アプリは一度終了して再起動します）",
+                        ver.c_str(), notes.c_str());
+            const int answer = MessageBoxW (hwnd, buf, L"MicFilter 更新",
+                                            MB_YESNO | MB_ICONINFORMATION);
+            if (answer == IDYES)
+            {
+                UpdateStatus (hwnd, L"更新をダウンロード中…");
+                DownloadAndApplyAsync (hwnd, offer->info);
+            }
+            delete offer;
+            return 0;
+        }
+        case WM_UPDATE_UPTODATE:
+            UpdateStatus (hwnd, L"お使いのバージョンは最新です");
+            return 0;
+        case WM_UPDATE_FAILED:
+        {
+            auto* message = reinterpret_cast<std::wstring*> (lp);
+            MessageBoxW (hwnd, message->c_str(), L"更新エラー", MB_OK | MB_ICONWARNING);
+            delete message;
+            return 0;
+        }
+        case WM_UPDATE_APPLY:
+            if (g_running) DoStop (hwnd);
+            DestroyWindow (hwnd);
             return 0;
         case WM_HSCROLL:
             if ((HWND) lp == Ctl (hwnd, IDC_MIC_LEVEL))
@@ -325,6 +369,12 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             {
                 if (g_running) DoStop (hwnd);
                 else DoStart (hwnd);
+                return 0;
+            }
+            if (LOWORD (wp) == IDC_UPDATE_BUTTON)
+            {
+                UpdateStatus (hwnd, L"更新を確認中…");
+                CheckForUpdateAsync (hwnd, true);
                 return 0;
             }
             if (LOWORD (wp) == IDC_AUTO_GAIN_CHECK)
@@ -416,7 +466,7 @@ int APIENTRY wWinMain (HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow)
 
     HWND hwnd = CreateWindowW (wc.lpszClassName, L"MicFilter クライアント",
                                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                               CW_USEDEFAULT, CW_USEDEFAULT, 540, 640,
+                               CW_USEDEFAULT, CW_USEDEFAULT, 540, 676,
                                nullptr, nullptr, hInst, nullptr);
     if (!hwnd) return 1;
     ShowWindow (hwnd, nShow);

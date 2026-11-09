@@ -1,0 +1,6 @@
+{
+  "version": "0.10.0",
+  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.10.0.zip",
+  "sha256": "6a83afd4ab080ae7ca78ed9738d41d072dfe40bd3ad145a2acc5bd84035e8108",
+  "notes": "自動更新に対応（次回から自動）。ながら自動補正を搭載"
+}

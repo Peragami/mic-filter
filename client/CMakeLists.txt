@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(MicFilterClient VERSION 0.9.0 LANGUAGES C CXX)
+project(MicFilterClient VERSION 0.10.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,6 +19,9 @@ add_executable(MicFilterClient WIN32
     src/passive_calibration.h
     src/passive_gain.h
     src/ui_shared.h
+    src/updater.cpp
+    src/updater.h
+    src/update_check.h
     src/wasapi_engine.cpp
     src/wasapi_engine.h
 )
@@ -76,4 +79,6 @@ target_link_libraries(MicFilterClient PRIVATE
     gdi32
     ksuser       # KSDATAFORMAT_SUBTYPE_* GUIDs
     uuid
+    winhttp      # self-update check / download
+    bcrypt       # SHA-256 verification of the update package
 )
