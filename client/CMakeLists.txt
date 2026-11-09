@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(MicFilterClient VERSION 0.13.0 LANGUAGES C CXX)
+project(MicFilterClient VERSION 0.14.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,6 +22,11 @@ add_executable(MicFilterClient WIN32
     src/updater.cpp
     src/updater.h
     src/update_check.h
+    src/preset.h
+    src/preset_json.cpp
+    src/preset_store.cpp
+    src/settings_window.cpp
+    src/settings_window.h
     src/wasapi_engine.cpp
     src/wasapi_engine.h
 )

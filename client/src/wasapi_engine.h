@@ -47,6 +47,9 @@ struct EngineConfig
     int blockFrames = ClientConfig::preferredBufferSamples; // 32/64/128/256
     // DSP parameters (MicFilterParams id -> normalized) applied at start.
     std::vector<std::pair<unsigned int, double>> initialParams;
+    // DSP stage order (pure2::ChainV2::StageId values, preset feature).
+    // Empty = the chain's default order.
+    std::vector<int> initialStageOrder;
 };
 
 class WasapiEngine
@@ -65,6 +68,9 @@ public:
     // Safe to call from the GUI thread at any time; the worker applies it
     // to the embedded chain at the next audio block.
     void SetParameter (unsigned int id, double normalized);
+    // Replace the DSP stage order (ChainV2::StageId permutation). Queued
+    // like parameters and applied at the next audio block boundary.
+    void SetStageOrder (const std::vector<int>& order);
     // DSP chain latency in samples at 48 kHz (0 until started).
     int LatencySamples() const { return latencySamples_.load(); }
 
@@ -94,6 +100,8 @@ private:
     std::thread worker_;
     std::mutex paramMutex_;
     std::vector<std::pair<unsigned int, double>> paramQueue_;
+    std::vector<int> pendingOrder_;
+    bool orderPending_ = false;
     std::atomic<bool> running_ { false };
     std::atomic<bool> stopRequested_ { false };
     std::atomic<float> peak_ { 0.0f };

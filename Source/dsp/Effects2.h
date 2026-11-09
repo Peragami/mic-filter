@@ -533,48 +533,98 @@ struct ChainV2
              + spectral.latencySamples() + (p.duck.on ? TransientDuck::kLookahead : 0)
              + rnnoiseStage.latencySamples() + bweStage.latencySamples();
     }
+    // --- Reorderable stages -------------------------------------------------
+    // The client can reorder stages per preset (setStageOrder); the VST
+    // build never calls it and keeps kDefaultStageOrder. Stage ids:
+    enum StageId
+    {
+        STAGE_DECLIP = 0, STAGE_DECLICK, STAGE_DUCK, STAGE_HPF, STAGE_HUM,
+        STAGE_RNNOISE, STAGE_SPECTRAL, STAGE_EQ, STAGE_MULTIBAND, STAGE_GATE,
+        STAGE_DEESSER, STAGE_COMP, STAGE_EXCITER, STAGE_BWE, STAGE_LIMITER,
+        STAGE_COUNT
+    };
+    static constexpr int kDefaultStageOrder[STAGE_COUNT] = {
+        STAGE_DECLIP, STAGE_DECLICK, STAGE_DUCK, STAGE_HPF, STAGE_HUM,
+        STAGE_RNNOISE, STAGE_SPECTRAL, STAGE_EQ, STAGE_MULTIBAND, STAGE_GATE,
+        STAGE_DEESSER, STAGE_COMP, STAGE_EXCITER, STAGE_BWE, STAGE_LIMITER
+    };
+    int stageOrder[STAGE_COUNT] = {
+        STAGE_DECLIP, STAGE_DECLICK, STAGE_DUCK, STAGE_HPF, STAGE_HUM,
+        STAGE_RNNOISE, STAGE_SPECTRAL, STAGE_EQ, STAGE_MULTIBAND, STAGE_GATE,
+        STAGE_DEESSER, STAGE_COMP, STAGE_EXCITER, STAGE_BWE, STAGE_LIMITER
+    };
+    // Accept only an exact permutation of all stages; anything else is
+    // ignored so a corrupt preset cannot break the chain.
+    void setStageOrder (const int* order, int n)
+    {
+        if (n != STAGE_COUNT) return;
+        bool seen[STAGE_COUNT] = {};
+        for (int i = 0; i < n; ++i)
+        {
+            if (order[i] < 0 || order[i] >= STAGE_COUNT || seen[order[i]]) return;
+            seen[order[i]] = true;
+        }
+        for (int i = 0; i < n; ++i) stageOrder[i] = order[i];
+    }
+
+    inline float processStage (int stage, float x)
+    {
+        switch (stage)
+        {
+            case STAGE_DECLIP: return declip.process (x);
+            case STAGE_DECLICK: return declick.process (x);
+            case STAGE_DUCK: return duck.process (x);
+            case STAGE_HPF: return p.base.hpfOn ? hpf.process (x) : x;
+            case STAGE_HUM: return hum.process (x);
+            case STAGE_RNNOISE: return rnnoiseStage.process (x);
+            case STAGE_SPECTRAL: return spectral.process (x);
+            case STAGE_EQ:
+                if (p.base.eqOn) { x = low.process (x); x = mid.process (x); x = high.process (x); }
+                return x;
+            case STAGE_MULTIBAND: return multiband.process (x);
+            case STAGE_GATE:
+            {
+                if (!p.base.gateOn) return x;
+                const float ax = std::fabs (x);
+                gateEnv = std::max (ax, gateEnv * 0.9995f);
+                // Breath mode: lower threshold + higher floor + slower close, so
+                // quiet sustained breath survives instead of being gated out.
+                const float threshDb = p.base.gateThreshDb + (p.breath.on ? -10.0f : 0.0f);
+                const float floorGain = p.breath.on ? 0.30f : 0.06f;
+                const float closeRate = p.breath.on ? 0.0008f : 0.002f;
+                float target = (gateEnv >= dbToGain (threshDb)) ? 1.0f : floorGain;
+                gateGain += (target - gateGain) * (target > gateGain ? 0.5f : closeRate);
+                return x * gateGain;
+            }
+            case STAGE_DEESSER: return deesser.process (x);
+            case STAGE_COMP:
+            {
+                if (!p.base.compOn) return x;
+                const float ax = std::fabs (x);
+                compEnv = std::max (ax, compEnv * 0.999f);
+                float over = dbToGain (p.base.compThreshDb);
+                if (compEnv > over && compEnv > 1e-6f)
+                {
+                    float excessDb = 20.0f * std::log10 (compEnv / over);
+                    float reduceDb = excessDb * (1.0f - 1.0f / p.base.compRatio);
+                    x *= dbToGain (-reduceDb);
+                }
+                return x;
+            }
+            case STAGE_EXCITER: return exciter.process (x);
+            case STAGE_BWE: return bweStage.process (x);
+            case STAGE_LIMITER: return p.base.limiterOn ? clampf (x, -0.89f, 0.89f) : x;
+            default: return x;
+        }
+    }
+
     inline float processSample (float x)
     {
         x *= dbToGain (p.base.inputGainDb);
-        x = declip.process (x);
-        x = declick.process (x);
-        x = duck.process (x);
-        if (p.base.hpfOn) x = hpf.process (x);
-        x = hum.process (x);
-        x = rnnoiseStage.process (x);
-        x = spectral.process (x);
-        if (p.base.eqOn) { x = low.process (x); x = mid.process (x); x = high.process (x); }
-        x = multiband.process (x);
-        float ax = std::fabs (x);
-        if (p.base.gateOn)
-        {
-            gateEnv = std::max (ax, gateEnv * 0.9995f);
-            // Breath mode: lower threshold + higher floor + slower close, so
-            // quiet sustained breath survives instead of being gated out.
-            const float threshDb = p.base.gateThreshDb + (p.breath.on ? -10.0f : 0.0f);
-            const float floorGain = p.breath.on ? 0.30f : 0.06f;
-            const float closeRate = p.breath.on ? 0.0008f : 0.002f;
-            float target = (gateEnv >= dbToGain (threshDb)) ? 1.0f : floorGain;
-            gateGain += (target - gateGain) * (target > gateGain ? 0.5f : closeRate);
-            x *= gateGain;
-        }
-        x = deesser.process (x);
-        if (p.base.compOn)
-        {
-            compEnv = std::max (ax, compEnv * 0.999f);
-            float over = dbToGain (p.base.compThreshDb);
-            if (compEnv > over && compEnv > 1e-6f)
-            {
-                float excessDb = 20.0f * std::log10 (compEnv / over);
-                float reduceDb = excessDb * (1.0f - 1.0f / p.base.compRatio);
-                x *= dbToGain (-reduceDb);
-            }
-        }
-        x = exciter.process (x);
-        x = bweStage.process (x);
-        if (p.base.limiterOn) x = clampf (x, -0.89f, 0.89f);
+        for (int i = 0; i < STAGE_COUNT; ++i) x = processStage (stageOrder[i], x);
         return x * dbToGain (p.base.outputGainDb);
     }
+
     void processBlock (float* buf, int n) { for (int i=0;i<n;++i) buf[i]=processSample(buf[i]); }
 };
 

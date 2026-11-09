@@ -631,6 +631,13 @@ void WasapiEngine::SetParameter (unsigned int id, double normalized)
     paramQueue_.push_back ({ id, normalized });
 }
 
+void WasapiEngine::SetStageOrder (const std::vector<int>& order)
+{
+    std::lock_guard<std::mutex> lock (paramMutex_);
+    pendingOrder_ = order;
+    orderPending_ = true;
+}
+
 void WasapiEngine::Stop()
 {
     stopRequested_ = true;
@@ -664,14 +671,21 @@ void WasapiEngine::WorkerMain (EngineConfig cfg)
         if (id < (unsigned int) MicFilterParams::kNumParams)
             values[id] = MicFilterParams::toPlain ((int) id, (float) v);
     chain.setParams (MicFilterBridge::paramsFromPlainValues (values));
+    if ((int) cfg.initialStageOrder.size() == pure2::ChainV2::STAGE_COUNT)
+        chain.setStageOrder (cfg.initialStageOrder.data(), pure2::ChainV2::STAGE_COUNT);
     latencySamples_.store (chain.latencySamples());
     miclog::Write ("engine: embedded DSP ready, latency=%d samples", chain.latencySamples());
     auto applyPendingParams = [&] {
         std::vector<std::pair<unsigned int, double>> pending;
+        std::vector<int> newOrder;
+        bool applyOrder = false;
         {
             std::lock_guard<std::mutex> lock (paramMutex_);
             pending.swap (paramQueue_);
+            if (orderPending_) { newOrder = pendingOrder_; applyOrder = true; orderPending_ = false; }
         }
+        if (applyOrder && (int) newOrder.size() == pure2::ChainV2::STAGE_COUNT)
+            chain.setStageOrder (newOrder.data(), pure2::ChainV2::STAGE_COUNT);
         if (pending.empty()) return;
         for (const auto& [id, v] : pending)
             if (id < (unsigned int) MicFilterParams::kNumParams)

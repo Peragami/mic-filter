@@ -1,6 +1,6 @@
 {
-  "version": "0.13.0",
-  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.13.0.zip",
-  "sha256": "f5abec6e6cf19162ebecabf7c3463b6def8bca00d4fdfd1f574344900d893137",
-  "notes": "フィルターを4グループ化（まとめてON/OFF、開いて個別にも切替可）"
+  "version": "0.14.0",
+  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.14.0.zip",
+  "sha256": "aac938b768ae542f380c912777dd06dc6b2412daa2cb2afe29c53d82cd83afdd",
+  "notes": "プリセット制に刷新：メインはプリセット選択のみ、設定ウィンドウでプリセット/グループ/順番を編集、exe横のpresetsフォルダに保存"
 }

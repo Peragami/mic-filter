@@ -2,6 +2,7 @@
 // No framework: plain Win32 controls, WASAPI does the audio, the DSP
 // chain is embedded in the engine (v0.7+). Mic level lives in
 // mic_level.cpp, passive auto calibration in passive_calibration.cpp,
+// presets in preset_*.cpp, filter settings window in settings_window.cpp,
 // shared UI bits in ui_shared.h. See README.md for usage.
 
 #include <windows.h>
@@ -18,6 +19,8 @@
 #include <vector>
 
 #include "passive_calibration.h"
+#include "preset.h"
+#include "settings_window.h"
 #include "log.h"
 #include "updater.h"
 #include "vst3/source/version.h" // STRING_VERSION
@@ -26,52 +29,13 @@
 #include "vst3/source/paramids.h" // MicFilterParams::ParamID (shared with the plugin)
 #include "wasapi_engine.h"
 
-// Per-filter on/off toggles, grouped (v0.13). Param ids come from the
-// plugin's paramids.h. The table order is group-contiguous: each group's
-// members are consecutive, and kFilterGroups points into it.
-struct FilterDef { int paramId; const wchar_t* label; bool defOn; };
-constexpr FilterDef kFilterDefs[] = {
-    // ノイズ除去
-    { MicFilterParams::kHumOn,       L"ハムノッチ（電源ブーン除去）", true },
-    { MicFilterParams::kMultibandOn, L"ノイズ抑制（帯域別）", true },
-    { MicFilterParams::kSpectralOn,  L"ヒス除去（スペクトル減算）", false },
-    { MicFilterParams::kRnnoiseOn,   L"AIノイズ除去（RNNoise）", false },
-    // 声を整える
-    { MicFilterParams::kHpfOn,       L"ハイパス（低音カット）", true },
-    { MicFilterParams::kEqOn,        L"EQ（音質補正）", true },
-    { MicFilterParams::kDeesserOn,   L"ディエッサー（サ行を柔らかく）", true },
-    { MicFilterParams::kExciterOn,   L"エキサイター（高音のツヤ）", true },
-    { MicFilterParams::kBweOn,       L"AI帯域拡張（声のツヤ・超解像）", false }, // +10ms latency when ON
-    // 音量を揃える
-    { MicFilterParams::kGateOn,      L"ノイズゲート", true },
-    { MicFilterParams::kBreathOn,    L"吐息キープ（息の音を残す）", false },
-    { MicFilterParams::kCompOn,      L"コンプレッサー（音量を揃える）", true },
-    { MicFilterParams::kLimiterOn,   L"リミッター（天井）", true },
-    // 音の修復
-    { MicFilterParams::kDuckOn,      L"クリック音カット（マウス/キー）", true },
-    { MicFilterParams::kDeclickOn,   L"リップノイズ除去", true },
-    { MicFilterParams::kDeclipOn,    L"音割れ補正（デクリップ）", true },
-};
-constexpr int kNumFilters = (int) (sizeof (kFilterDefs) / sizeof (kFilterDefs[0]));
+// The live preset (v0.14): filter on/off + stage order come from here.
+// Stored as JSON under <exe dir>\presets and edited in the settings
+// window; the main window only picks which preset is active.
+Preset g_currentPreset = DefaultPreset();
 
-struct FilterGroupDef { const wchar_t* name; int first; int count; };
-constexpr FilterGroupDef kFilterGroups[] = {
-    { L"ノイズ除去", 0, 4 },
-    { L"声を整える", 4, 5 },
-    { L"音量を揃える", 9, 4 },
-    { L"音の修復", 13, 3 },
-};
-constexpr int kNumGroups = (int) (sizeof (kFilterGroups) / sizeof (kFilterGroups[0]));
-bool g_groupOpen[kNumGroups] = {}; // all collapsed at launch
-
-int GroupOfFilter (int filterIndex)
-{
-    for (int g = 0; g < kNumGroups; ++g)
-        if (filterIndex >= kFilterGroups[g].first &&
-            filterIndex < kFilterGroups[g].first + kFilterGroups[g].count)
-            return g;
-    return -1;
-}
+void ApplyPresetLive();              // defined below
+void RefreshPresetCombo (HWND hwnd); // defined below
 
 WasapiEngine g_engine;
 std::vector<AudioDeviceInfo> g_captureDevices;
@@ -193,55 +157,6 @@ void SetToggleText (HWND button, bool on, const wchar_t* label)
     SetWindowTextW (button, text.c_str());
 }
 
-// Group header caption: ● all on / ◐ some on / ○ all off, plus a count.
-void UpdateGroupHeader (HWND hwnd, int g)
-{
-    const FilterGroupDef& grp = kFilterGroups[g];
-    int on = 0;
-    for (int j = 0; j < grp.count; ++j)
-        if (IsChecked (hwnd, IDC_FILTER_BASE + grp.first + j)) ++on;
-    const wchar_t* mark = on == grp.count ? L"●" : (on == 0 ? L"○" : L"◐");
-    wchar_t buf[128];
-    swprintf_s (buf, L"%s %s（%d/%d）", mark, grp.name, on, grp.count);
-    SetWindowTextW (Ctl (hwnd, IDC_GROUP_BASE + g), buf);
-    SetWindowTextW (Ctl (hwnd, IDC_GROUP_EXPAND_BASE + g),
-                    g_groupOpen[g] ? L"▲ 閉じる" : L"▼ 開く");
-}
-
-// Position the group headers, the member toggles of open groups (hidden
-// otherwise), the version row under them, and resize the window to fit.
-void LayoutFilters (HWND hwnd)
-{
-    int y = 398;
-    for (int g = 0; g < kNumGroups; ++g)
-    {
-        const FilterGroupDef& grp = kFilterGroups[g];
-        SetWindowPos (Ctl (hwnd, IDC_GROUP_BASE + g), nullptr, 16, y, 376, 24,
-                      SWP_NOZORDER | SWP_SHOWWINDOW);
-        SetWindowPos (Ctl (hwnd, IDC_GROUP_EXPAND_BASE + g), nullptr, 400, y, 86, 24,
-                      SWP_NOZORDER | SWP_SHOWWINDOW);
-        y += 26;
-        const int rows = (grp.count + 1) / 2;
-        for (int j = 0; j < grp.count; ++j)
-        {
-            HWND member = Ctl (hwnd, IDC_FILTER_BASE + grp.first + j);
-            if (g_groupOpen[g])
-            {
-                const int col = j % 2, row = j / 2;
-                SetWindowPos (member, nullptr, 32 + col * 237, y + row * 26,
-                              col == 0 ? 225 : 221, 24, SWP_NOZORDER | SWP_SHOWWINDOW);
-            }
-            else ShowWindow (member, SW_HIDE);
-        }
-        if (g_groupOpen[g]) y += rows * 26;
-        UpdateGroupHeader (hwnd, g);
-    }
-    SetWindowPos (Ctl (hwnd, IDC_VERSION_LABEL), nullptr, 16, y + 12, 200, 20, SWP_NOZORDER);
-    SetWindowPos (Ctl (hwnd, IDC_UPDATE_BUTTON), nullptr, 366, y + 8, 120, 26, SWP_NOZORDER);
-    SetWindowPos (hwnd, nullptr, 0, 0, 540, y + 12 + 26 + 36,
-                  SWP_NOMOVE | SWP_NOZORDER);
-}
-
 void UpdateStatus (HWND hwnd, const std::wstring& prefix)
 {
     std::wstring text;
@@ -261,15 +176,56 @@ void UpdateStatus (HWND hwnd, const std::wstring& prefix)
     SetWindowTextW (Ctl (hwnd, IDC_STATUS), text.c_str());
 }
 
+void ApplyPresetLive()
+{
+    for (int i = 0; i < kNumFilterInfos; ++i)
+    {
+        const FilterInfo& f = kFilterRegistry[i];
+        const auto it = g_currentPreset.on.find (f.key);
+        g_engine.SetParameter ((unsigned int) f.paramId,
+                               it != g_currentPreset.on.end() && it->second ? 1.0 : 0.0);
+    }
+    g_engine.SetStageOrder (StageOrderIds (g_currentPreset));
+    miclog::Write ("preset: applied '%s' live", WideToUtf8 (g_currentPreset.name).c_str());
+}
+
+// (Re)fill the preset combo from the presets folder. Keeps the current
+// preset selected when it still exists; loads the selection into
+// g_currentPreset when it changed or was never loaded.
+void RefreshPresetCombo (HWND hwnd)
+{
+    EnsurePresetStore();
+    const std::vector<std::wstring> names = ListPresetNames();
+    HWND combo = Ctl (hwnd, IDC_PRESET_COMBO);
+    SendMessageW (combo, CB_RESETCONTENT, 0, 0);
+    int select = 0;
+    for (size_t i = 0; i < names.size(); ++i)
+    {
+        SendMessageW (combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM> (names[i].c_str()));
+        if (names[i] == g_currentPreset.name) select = (int) i;
+    }
+    if (!names.empty())
+    {
+        SendMessageW (combo, CB_SETCURSEL, select, 0);
+        Preset p;
+        if (LoadPreset (names[(size_t) select], p)) g_currentPreset = p;
+    }
+}
+
 bool StartEngine (HWND hwnd)
 {
     EngineConfig cfg;
     cfg.inputDeviceId = SelectedDeviceId (Ctl (hwnd, IDC_INPUT_COMBO), g_captureDevices);
     cfg.outputDeviceId = SelectedDeviceId (Ctl (hwnd, IDC_OUTPUT_COMBO), g_renderDevices);
     cfg.blockFrames = SelectedBlockFrames (hwnd);
-    for (int i = 0; i < kNumFilters; ++i)
-        cfg.initialParams.push_back ({ (unsigned int) kFilterDefs[i].paramId,
-                                       IsChecked (hwnd, IDC_FILTER_BASE + i) ? 1.0 : 0.0 });
+    for (int i = 0; i < kNumFilterInfos; ++i)
+    {
+        const FilterInfo& f = kFilterRegistry[i];
+        const auto it = g_currentPreset.on.find (f.key);
+        cfg.initialParams.push_back ({ (unsigned int) f.paramId,
+                                       it != g_currentPreset.on.end() && it->second ? 1.0 : 0.0 });
+    }
+    cfg.initialStageOrder = StageOrderIds (g_currentPreset);
     std::wstring err;
     if (!g_engine.Start (cfg, err))
     {
@@ -355,39 +311,19 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                  reinterpret_cast<HMENU> ((INT_PTR) IDC_STATUS),
                                  nullptr, nullptr));
 
-            AddLabel (hwnd, L"フィルター（グループ一括ON/OFF、開くと個別に切替）", 16, 342, 470);
+            AddLabel (hwnd, L"プリセット（フィルター設定は別ウィンドウで）", 16, 342, 470);
+            make (AddCombo (hwnd, IDC_PRESET_COMBO, 16, 364, 300));
+            make (CreateWindowW (L"BUTTON", L"フィルター設定…", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                 326, 362, 160, 26, hwnd,
+                                 reinterpret_cast<HMENU> ((INT_PTR) IDC_SETTINGS_BUTTON),
+                                 nullptr, nullptr));
             {
                 HWND dry = make (CreateWindowW (L"BUTTON", L"",
                                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX | BS_PUSHLIKE,
-                                                16, 366, 470, 24, hwnd,
+                                                16, 398, 470, 24, hwnd,
                                                 reinterpret_cast<HMENU> ((INT_PTR) IDC_DRY_CHECK),
                                                 nullptr, nullptr));
                 SetToggleText (dry, false, L"ドライ（全フィルターOFFの音を聞く）");
-            }
-            // Group headers + member toggles; LayoutFilters() positions
-            // everything (members of closed groups start hidden).
-            for (int g = 0; g < kNumGroups; ++g)
-            {
-                make (CreateWindowW (L"BUTTON", L"",
-                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                     0, 0, 10, 10, hwnd,
-                                     reinterpret_cast<HMENU> ((INT_PTR) (IDC_GROUP_BASE + g)),
-                                     nullptr, nullptr));
-                make (CreateWindowW (L"BUTTON", L"",
-                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                     0, 0, 10, 10, hwnd,
-                                     reinterpret_cast<HMENU> ((INT_PTR) (IDC_GROUP_EXPAND_BASE + g)),
-                                     nullptr, nullptr));
-            }
-            for (int i = 0; i < kNumFilters; ++i)
-            {
-                HWND cb = make (CreateWindowW (L"BUTTON", L"",
-                                               WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX | BS_PUSHLIKE,
-                                               0, 0, 10, 10, hwnd,
-                                               reinterpret_cast<HMENU> ((INT_PTR) (IDC_FILTER_BASE + i)),
-                                               nullptr, nullptr));
-                SendMessageW (cb, BM_SETCHECK, kFilterDefs[i].defOn ? BST_CHECKED : BST_UNCHECKED, 0);
-                SetToggleText (cb, kFilterDefs[i].defOn, kFilterDefs[i].label);
             }
 
             g_captureDevices = EnumerateCaptureDevices();
@@ -409,15 +345,15 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 wchar_t vbuf[64];
                 swprintf_s (vbuf, L"バージョン %hs", STRING_VERSION);
                 make (CreateWindowW (L"STATIC", vbuf, WS_CHILD | WS_VISIBLE,
-                                     16, 620, 200, 20, hwnd,
+                                     16, 436, 200, 20, hwnd,
                                      reinterpret_cast<HMENU> ((INT_PTR) IDC_VERSION_LABEL),
                                      nullptr, nullptr));
                 make (CreateWindowW (L"BUTTON", L"更新を確認", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                     366, 616, 120, 26, hwnd,
+                                     366, 432, 120, 26, hwnd,
                                      reinterpret_cast<HMENU> ((INT_PTR) IDC_UPDATE_BUTTON),
                                      nullptr, nullptr));
             }
-            LayoutFilters (hwnd);
+            RefreshPresetCombo (hwnd); // also loads g_currentPreset
             SetTimer (hwnd, kTimerId, 50, nullptr);
             CheckForUpdateAsync (hwnd, false); // silent auto-check on launch
             PostMessageW (hwnd, WM_AUTOSTART_MSG, 0, 0); // engine always on
@@ -521,45 +457,47 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 miclog::Write ("app: dry(bypass) = %d", dry ? 1 : 0);
                 return 0;
             }
-            if (LOWORD (wp) >= IDC_GROUP_BASE && LOWORD (wp) < IDC_GROUP_BASE + kNumGroups)
+            if (LOWORD (wp) == IDC_PRESET_COMBO && HIWORD (wp) == CBN_SELCHANGE)
             {
-                const int g = LOWORD (wp) - IDC_GROUP_BASE;
-                const FilterGroupDef& grp = kFilterGroups[g];
-                int on = 0;
-                for (int j = 0; j < grp.count; ++j)
-                    if (IsChecked (hwnd, IDC_FILTER_BASE + grp.first + j)) ++on;
-                const bool target = on != grp.count; // all on -> off, otherwise on
-                for (int j = 0; j < grp.count; ++j)
+                const LRESULT sel = SendMessageW (Ctl (hwnd, IDC_PRESET_COMBO), CB_GETCURSEL, 0, 0);
+                if (sel != CB_ERR)
                 {
-                    const int i = grp.first + j;
-                    SendMessageW (Ctl (hwnd, IDC_FILTER_BASE + i), BM_SETCHECK,
-                                  target ? BST_CHECKED : BST_UNCHECKED, 0);
-                    g_engine.SetParameter ((unsigned int) kFilterDefs[i].paramId, target ? 1.0 : 0.0);
-                    SetToggleText (Ctl (hwnd, IDC_FILTER_BASE + i), target, kFilterDefs[i].label);
+                    wchar_t buf[256];
+                    SendMessageW (Ctl (hwnd, IDC_PRESET_COMBO), CB_GETLBTEXT, sel,
+                                  reinterpret_cast<LPARAM> (buf));
+                    Preset p;
+                    if (LoadPreset (buf, p))
+                    {
+                        g_currentPreset = p;
+                        if (g_running) ApplyPresetLive();
+                        miclog::Write ("preset: selected '%s'", WideToUtf8 (p.name).c_str());
+                    }
                 }
-                UpdateGroupHeader (hwnd, g);
-                miclog::Write ("app: filter group %d -> %d", g, target ? 1 : 0);
                 return 0;
             }
-            if (LOWORD (wp) >= IDC_GROUP_EXPAND_BASE && LOWORD (wp) < IDC_GROUP_EXPAND_BASE + kNumGroups)
+            if (LOWORD (wp) == IDC_SETTINGS_BUTTON)
             {
-                const int g = LOWORD (wp) - IDC_GROUP_EXPAND_BASE;
-                g_groupOpen[g] = !g_groupOpen[g];
-                LayoutFilters (hwnd);
-                return 0;
-            }
-            if (LOWORD (wp) >= IDC_FILTER_BASE && LOWORD (wp) < IDC_FILTER_BASE + kNumFilters)
-            {
-                const int i = LOWORD (wp) - IDC_FILTER_BASE;
-                const bool on = IsChecked (hwnd, IDC_FILTER_BASE + i);
-                g_engine.SetParameter ((unsigned int) kFilterDefs[i].paramId, on ? 1.0 : 0.0);
-                SetToggleText (Ctl (hwnd, IDC_FILTER_BASE + i), on, kFilterDefs[i].label);
-                const int g = GroupOfFilter (i);
-                if (g >= 0) UpdateGroupHeader (hwnd, g);
-                miclog::Write ("app: filter param %d -> %d", kFilterDefs[i].paramId, on ? 1 : 0);
+                OpenSettingsWindow (hwnd, g_currentPreset.name);
                 return 0;
             }
             break;
+        case WM_PRESET_CHANGED:
+        {
+            // The settings window saved something. lParam may carry the
+            // name the main window should select (rename / new / apply).
+            std::wstring selectName = g_currentPreset.name;
+            if (lp)
+            {
+                selectName = *reinterpret_cast<std::wstring*> (lp);
+                delete reinterpret_cast<std::wstring*> (lp);
+            }
+            const std::wstring before = g_currentPreset.name;
+            g_currentPreset.name = selectName;
+            RefreshPresetCombo (hwnd);
+            if (g_running) ApplyPresetLive();
+            (void) before;
+            return 0;
+        }
         case WM_TIMER:
             if (wp == kTimerId)
             {
@@ -627,7 +565,7 @@ int APIENTRY wWinMain (HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow)
 
     HWND hwnd = CreateWindowW (wc.lpszClassName, L"MicFilter クライアント",
                                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                               CW_USEDEFAULT, CW_USEDEFAULT, 540, 676,
+                               CW_USEDEFAULT, CW_USEDEFAULT, 540, 496,
                                nullptr, nullptr, hInst, nullptr);
     if (!hwnd) return 1;
     ShowWindow (hwnd, nShow);
