@@ -148,10 +148,25 @@ const wchar_t* ModeName (ClientConfig::Mode m)
     }
 }
 
-void SetControlsEnabled (HWND hwnd, bool enabled)
+// The engine runs from launch until the window closes (v0.11: the
+// start/stop button is gone). Device / buffer changes restart it.
+constexpr UINT WM_AUTOSTART_MSG = WM_APP + 6;
+constexpr UINT WM_RESTART_MSG = WM_APP + 7;
+bool g_restartPending = false;
+
+void ScheduleRestart (HWND hwnd)
 {
-    const int ids[] = { IDC_INPUT_COMBO, IDC_OUTPUT_COMBO, IDC_BUFFER_COMBO };
-    for (int id : ids) EnableWindow (Ctl (hwnd, id), enabled);
+    if (g_restartPending) return;
+    g_restartPending = true;
+    PostMessageW (hwnd, WM_RESTART_MSG, 0, 0);
+}
+
+// Toggle buttons (BS_PUSHLIKE) show their state in the caption too:
+// a filled dot when on, an open dot when off.
+void SetToggleText (HWND button, bool on, const wchar_t* label)
+{
+    const std::wstring text = std::wstring (on ? L"● " : L"○ ") + label;
+    SetWindowTextW (button, text.c_str());
 }
 
 void UpdateStatus (HWND hwnd, const std::wstring& prefix)
@@ -173,7 +188,7 @@ void UpdateStatus (HWND hwnd, const std::wstring& prefix)
     SetWindowTextW (Ctl (hwnd, IDC_STATUS), text.c_str());
 }
 
-bool DoStart (HWND hwnd)
+bool StartEngine (HWND hwnd)
 {
     EngineConfig cfg;
     cfg.inputDeviceId = SelectedDeviceId (Ctl (hwnd, IDC_INPUT_COMBO), g_captureDevices);
@@ -186,7 +201,9 @@ bool DoStart (HWND hwnd)
     if (!g_engine.Start (cfg, err))
     {
         miclog::WriteW (L"app: start failed: %s", err.c_str());
-        MessageBoxW (hwnd, err.c_str(), L"開始できませんでした", MB_OK | MB_ICONERROR);
+        g_running = false;
+        SetWindowTextW (Ctl (hwnd, IDC_STATUS),
+                        (L"開始できませんでした：" + err).c_str());
         return false;
     }
     miclog::Write ("app: started (mode=%d block=%d)", (int) g_engine.ActiveMode(),
@@ -194,19 +211,15 @@ bool DoStart (HWND hwnd)
     if (IsChecked (hwnd, IDC_DRY_CHECK)) g_engine.SetBypass (true);
     PassiveCalOnStart (hwnd);
     g_running = true;
-    SetWindowTextW (Ctl (hwnd, IDC_START_BUTTON), L"停止");
-    SetControlsEnabled (hwnd, false);
     UpdateStatus (hwnd);
     return true;
 }
 
-void DoStop (HWND hwnd)
+void StopEngine (HWND hwnd)
 {
     miclog::Write ("app: stopping (xruns=%llu)", g_engine.XrunCount());
     g_engine.Stop();
     g_running = false;
-    SetWindowTextW (Ctl (hwnd, IDC_START_BUTTON), L"開始");
-    SetControlsEnabled (hwnd, true);
     SendMessageW (Ctl (hwnd, IDC_METER), PBM_SETPOS, 0, 0);
     g_meterDisplay = 0.0f;
     UpdateStatus (hwnd);
@@ -247,19 +260,15 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                  reinterpret_cast<HMENU> ((INT_PTR) IDC_MIC_LEVEL_VALUE),
                                  nullptr, nullptr));
 
-            make (CreateWindowW (L"BUTTON", L"開始", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                                 16, 252, 120, 32, hwnd,
-                                 reinterpret_cast<HMENU> ((INT_PTR) IDC_START_BUTTON),
-                                 nullptr, nullptr));
             HWND agc = make (CreateWindowW (L"BUTTON", L"自動補正",
                                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                                            146, 257, 110, 24, hwnd,
+                                            16, 257, 110, 24, hwnd,
                                             reinterpret_cast<HMENU> ((INT_PTR) IDC_AUTO_GAIN_CHECK),
                                             nullptr, nullptr));
             SendMessageW (agc, BM_SETCHECK, BST_CHECKED, 0); // passive calibration on by default
             HWND meter = CreateWindowW (PROGRESS_CLASSW, L"",
                                         WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
-                                        262, 258, 224, 20, hwnd,
+                                        140, 258, 346, 20, hwnd,
                                         reinterpret_cast<HMENU> ((INT_PTR) IDC_METER),
                                         nullptr, nullptr);
             SendMessageW (meter, PBM_SETRANGE, 0, MAKELPARAM (0, 1000));
@@ -268,24 +277,25 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                  reinterpret_cast<HMENU> ((INT_PTR) IDC_STATUS),
                                  nullptr, nullptr));
 
-            AddLabel (hwnd, L"フィルター（動作中に切り替えOK、そのまま音で比べられます）", 16, 342, 470);
+            AddLabel (hwnd, L"フィルター（ボタンでON/OFF、そのまま音で比べられます）", 16, 342, 470);
             {
-                HWND dry = make (CreateWindowW (L"BUTTON", L"ドライ（全フィルターOFFの音を聞く）",
-                                                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                                                16, 366, 470, 22, hwnd,
+                HWND dry = make (CreateWindowW (L"BUTTON", L"",
+                                                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX | BS_PUSHLIKE,
+                                                16, 366, 470, 24, hwnd,
                                                 reinterpret_cast<HMENU> ((INT_PTR) IDC_DRY_CHECK),
                                                 nullptr, nullptr));
-                (void) dry;
+                SetToggleText (dry, false, L"ドライ（全フィルターOFFの音を聞く）");
             }
             for (int i = 0; i < kNumFilters; ++i)
             {
                 const int col = i % 2, row = i / 2;
-                HWND cb = make (CreateWindowW (L"BUTTON", kFilterDefs[i].label,
-                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                                               16 + col * 245, 396 + row * 24, 240, 22, hwnd,
+                HWND cb = make (CreateWindowW (L"BUTTON", L"",
+                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX | BS_PUSHLIKE,
+                                               16 + col * 245, 394 + row * 26, 240, 24, hwnd,
                                                reinterpret_cast<HMENU> ((INT_PTR) (IDC_FILTER_BASE + i)),
                                                nullptr, nullptr));
                 SendMessageW (cb, BM_SETCHECK, kFilterDefs[i].defOn ? BST_CHECKED : BST_UNCHECKED, 0);
+                SetToggleText (cb, kFilterDefs[i].defOn, kFilterDefs[i].label);
             }
 
             g_captureDevices = EnumerateCaptureDevices();
@@ -314,8 +324,17 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             SetTimer (hwnd, kTimerId, 50, nullptr);
             CheckForUpdateAsync (hwnd, false); // silent auto-check on launch
+            PostMessageW (hwnd, WM_AUTOSTART_MSG, 0, 0); // engine always on
             return 0;
         }
+        case WM_AUTOSTART_MSG:
+            StartEngine (hwnd);
+            return 0;
+        case WM_RESTART_MSG:
+            g_restartPending = false;
+            StopEngine (hwnd);
+            StartEngine (hwnd);
+            return 0;
         case WM_DEVICECHANGE_MSG:
             miclog::Write ("app: audio device change notification");
             ReenumerateDevices (hwnd);
@@ -349,7 +368,7 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         case WM_UPDATE_APPLY:
-            if (g_running) DoStop (hwnd);
+            if (g_running) StopEngine (hwnd);
             DestroyWindow (hwnd);
             return 0;
         case WM_HSCROLL:
@@ -363,12 +382,13 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (LOWORD (wp) == IDC_INPUT_COMBO && HIWORD (wp) == CBN_SELCHANGE)
             {
                 RefreshMicLevelFromDevice (hwnd);
+                ScheduleRestart (hwnd);
                 return 0;
             }
-            if (LOWORD (wp) == IDC_START_BUTTON)
+            if ((LOWORD (wp) == IDC_OUTPUT_COMBO || LOWORD (wp) == IDC_BUFFER_COMBO) &&
+                HIWORD (wp) == CBN_SELCHANGE)
             {
-                if (g_running) DoStop (hwnd);
-                else DoStart (hwnd);
+                ScheduleRestart (hwnd);
                 return 0;
             }
             if (LOWORD (wp) == IDC_UPDATE_BUTTON)
@@ -387,6 +407,7 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             {
                 const bool dry = IsChecked (hwnd, IDC_DRY_CHECK);
                 g_engine.SetBypass (dry);
+                SetToggleText (Ctl (hwnd, IDC_DRY_CHECK), dry, L"ドライ（全フィルターOFFの音を聞く）");
                 miclog::Write ("app: dry(bypass) = %d", dry ? 1 : 0);
                 return 0;
             }
@@ -395,6 +416,7 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 const int i = LOWORD (wp) - IDC_FILTER_BASE;
                 const bool on = IsChecked (hwnd, IDC_FILTER_BASE + i);
                 g_engine.SetParameter ((unsigned int) kFilterDefs[i].paramId, on ? 1.0 : 0.0);
+                SetToggleText (Ctl (hwnd, IDC_FILTER_BASE + i), on, kFilterDefs[i].label);
                 miclog::Write ("app: filter param %d -> %d", kFilterDefs[i].paramId, on ? 1 : 0);
                 return 0;
             }
@@ -409,9 +431,9 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     const int requested = g_engine.RequestedBufferFrames();
                     if (requested > 0 && requested != SelectedBlockFrames (hwnd))
                     {
-                        DoStop (hwnd);
+                        StopEngine (hwnd);
                         SelectBlockFrames (hwnd, requested);
-                        if (DoStart (hwnd))
+                        if (StartEngine (hwnd))
                             UpdateStatus (hwnd, L"XRUN多発のためバッファを自動で上げました");
                         return 0;
                     }
@@ -425,7 +447,7 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             break;
         case WM_CLOSE:
-            if (g_running) DoStop (hwnd);
+            if (g_running) StopEngine (hwnd);
             DestroyWindow (hwnd);
             return 0;
         case WM_DESTROY:

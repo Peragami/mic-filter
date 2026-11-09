@@ -14,7 +14,6 @@
 constexpr int IDC_INPUT_COMBO = 1001;
 constexpr int IDC_OUTPUT_COMBO = 1002;
 constexpr int IDC_BUFFER_COMBO = 1003;
-constexpr int IDC_START_BUTTON = 1006;
 constexpr int IDC_METER = 1007;
 constexpr int IDC_STATUS = 1008;
 constexpr int IDC_MIC_LEVEL = 1009;
