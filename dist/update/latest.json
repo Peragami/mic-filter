@@ -1,6 +1,6 @@
 {
-  "version": "0.11.0",
-  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.11.0.zip",
-  "sha256": "6b7053255e4da6bbd8ec232ae64f0a1179d6962e9b28ff8352c86bb1bab6b2b7",
-  "notes": "開始ボタンを廃止して起動時から常時動作に。フィルターはボタン式に変更"
+  "version": "0.12.0",
+  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.12.0.zip",
+  "sha256": "bebee9c8866a51e5cc66a00975a3fed4d459a97f42c4c3e7337b958cb4213d14",
+  "notes": "停止チェックを追加（常時動作はそのまま）。フィルターはボタン式"
 }

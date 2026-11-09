@@ -266,9 +266,14 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                             reinterpret_cast<HMENU> ((INT_PTR) IDC_AUTO_GAIN_CHECK),
                                             nullptr, nullptr));
             SendMessageW (agc, BM_SETCHECK, BST_CHECKED, 0); // passive calibration on by default
+            make (CreateWindowW (L"BUTTON", L"停止",
+                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                 134, 257, 64, 24, hwnd,
+                                 reinterpret_cast<HMENU> ((INT_PTR) IDC_STOP_CHECK),
+                                 nullptr, nullptr));
             HWND meter = CreateWindowW (PROGRESS_CLASSW, L"",
                                         WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
-                                        140, 258, 346, 20, hwnd,
+                                        206, 258, 280, 20, hwnd,
                                         reinterpret_cast<HMENU> ((INT_PTR) IDC_METER),
                                         nullptr, nullptr);
             SendMessageW (meter, PBM_SETRANGE, 0, MAKELPARAM (0, 1000));
@@ -328,12 +333,12 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         case WM_AUTOSTART_MSG:
-            StartEngine (hwnd);
+            if (!IsChecked (hwnd, IDC_STOP_CHECK)) StartEngine (hwnd);
             return 0;
         case WM_RESTART_MSG:
             g_restartPending = false;
             StopEngine (hwnd);
-            StartEngine (hwnd);
+            if (!IsChecked (hwnd, IDC_STOP_CHECK)) StartEngine (hwnd);
             return 0;
         case WM_DEVICECHANGE_MSG:
             miclog::Write ("app: audio device change notification");
@@ -389,6 +394,20 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 HIWORD (wp) == CBN_SELCHANGE)
             {
                 ScheduleRestart (hwnd);
+                return 0;
+            }
+            if (LOWORD (wp) == IDC_STOP_CHECK)
+            {
+                if (IsChecked (hwnd, IDC_STOP_CHECK))
+                {
+                    if (g_running) StopEngine (hwnd);
+                    miclog::Write ("app: stopped by user checkbox");
+                }
+                else
+                {
+                    StartEngine (hwnd);
+                    miclog::Write ("app: resumed by user checkbox");
+                }
                 return 0;
             }
             if (LOWORD (wp) == IDC_UPDATE_BUTTON)

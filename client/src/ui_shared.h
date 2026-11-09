@@ -21,6 +21,7 @@ constexpr int IDC_MIC_LEVEL_VALUE = 1010;
 constexpr int IDC_AUTO_GAIN_CHECK = 1011;
 constexpr int IDC_DRY_CHECK = 1012;
 constexpr int IDC_UPDATE_BUTTON = 1013;
+constexpr int IDC_STOP_CHECK = 1014;
 constexpr int IDC_FILTER_BASE = 1020; // + index into the filter table in main.cpp
 
 constexpr UINT_PTR kTimerId = 1;
