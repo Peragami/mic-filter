@@ -26,28 +26,52 @@
 #include "vst3/source/paramids.h" // MicFilterParams::ParamID (shared with the plugin)
 #include "wasapi_engine.h"
 
-// Per-filter on/off switches. Param ids come from the plugin's paramids.h;
-// all of these default to ON in the plugin, so the boxes start checked.
+// Per-filter on/off toggles, grouped (v0.13). Param ids come from the
+// plugin's paramids.h. The table order is group-contiguous: each group's
+// members are consecutive, and kFilterGroups points into it.
 struct FilterDef { int paramId; const wchar_t* label; bool defOn; };
 constexpr FilterDef kFilterDefs[] = {
-    { MicFilterParams::kHpfOn,       L"ハイパス（低音カット）", true },
+    // ノイズ除去
     { MicFilterParams::kHumOn,       L"ハムノッチ（電源ブーン除去）", true },
-    { MicFilterParams::kGateOn,      L"ノイズゲート", true },
     { MicFilterParams::kMultibandOn, L"ノイズ抑制（帯域別）", true },
     { MicFilterParams::kSpectralOn,  L"ヒス除去（スペクトル減算）", false },
     { MicFilterParams::kRnnoiseOn,   L"AIノイズ除去（RNNoise）", false },
-    { MicFilterParams::kBweOn,       L"AI帯域拡張（声のツヤ・超解像）", false }, // +10.7ms latency when ON
+    // 声を整える
+    { MicFilterParams::kHpfOn,       L"ハイパス（低音カット）", true },
     { MicFilterParams::kEqOn,        L"EQ（音質補正）", true },
-    { MicFilterParams::kDuckOn,      L"クリック音カット（マウス/キー）", true },
-    { MicFilterParams::kBreathOn,    L"吐息キープ（息の音を残す）", false },
-    { MicFilterParams::kDeclickOn,   L"リップノイズ除去", true },
-    { MicFilterParams::kDeclipOn,    L"音割れ補正（デクリップ）", true },
     { MicFilterParams::kDeesserOn,   L"ディエッサー（サ行を柔らかく）", true },
     { MicFilterParams::kExciterOn,   L"エキサイター（高音のツヤ）", true },
+    { MicFilterParams::kBweOn,       L"AI帯域拡張（声のツヤ・超解像）", false }, // +10ms latency when ON
+    // 音量を揃える
+    { MicFilterParams::kGateOn,      L"ノイズゲート", true },
+    { MicFilterParams::kBreathOn,    L"吐息キープ（息の音を残す）", false },
     { MicFilterParams::kCompOn,      L"コンプレッサー（音量を揃える）", true },
     { MicFilterParams::kLimiterOn,   L"リミッター（天井）", true },
+    // 音の修復
+    { MicFilterParams::kDuckOn,      L"クリック音カット（マウス/キー）", true },
+    { MicFilterParams::kDeclickOn,   L"リップノイズ除去", true },
+    { MicFilterParams::kDeclipOn,    L"音割れ補正（デクリップ）", true },
 };
 constexpr int kNumFilters = (int) (sizeof (kFilterDefs) / sizeof (kFilterDefs[0]));
+
+struct FilterGroupDef { const wchar_t* name; int first; int count; };
+constexpr FilterGroupDef kFilterGroups[] = {
+    { L"ノイズ除去", 0, 4 },
+    { L"声を整える", 4, 5 },
+    { L"音量を揃える", 9, 4 },
+    { L"音の修復", 13, 3 },
+};
+constexpr int kNumGroups = (int) (sizeof (kFilterGroups) / sizeof (kFilterGroups[0]));
+bool g_groupOpen[kNumGroups] = {}; // all collapsed at launch
+
+int GroupOfFilter (int filterIndex)
+{
+    for (int g = 0; g < kNumGroups; ++g)
+        if (filterIndex >= kFilterGroups[g].first &&
+            filterIndex < kFilterGroups[g].first + kFilterGroups[g].count)
+            return g;
+    return -1;
+}
 
 WasapiEngine g_engine;
 std::vector<AudioDeviceInfo> g_captureDevices;
@@ -169,6 +193,55 @@ void SetToggleText (HWND button, bool on, const wchar_t* label)
     SetWindowTextW (button, text.c_str());
 }
 
+// Group header caption: ● all on / ◐ some on / ○ all off, plus a count.
+void UpdateGroupHeader (HWND hwnd, int g)
+{
+    const FilterGroupDef& grp = kFilterGroups[g];
+    int on = 0;
+    for (int j = 0; j < grp.count; ++j)
+        if (IsChecked (hwnd, IDC_FILTER_BASE + grp.first + j)) ++on;
+    const wchar_t* mark = on == grp.count ? L"●" : (on == 0 ? L"○" : L"◐");
+    wchar_t buf[128];
+    swprintf_s (buf, L"%s %s（%d/%d）", mark, grp.name, on, grp.count);
+    SetWindowTextW (Ctl (hwnd, IDC_GROUP_BASE + g), buf);
+    SetWindowTextW (Ctl (hwnd, IDC_GROUP_EXPAND_BASE + g),
+                    g_groupOpen[g] ? L"▲ 閉じる" : L"▼ 開く");
+}
+
+// Position the group headers, the member toggles of open groups (hidden
+// otherwise), the version row under them, and resize the window to fit.
+void LayoutFilters (HWND hwnd)
+{
+    int y = 398;
+    for (int g = 0; g < kNumGroups; ++g)
+    {
+        const FilterGroupDef& grp = kFilterGroups[g];
+        SetWindowPos (Ctl (hwnd, IDC_GROUP_BASE + g), nullptr, 16, y, 376, 24,
+                      SWP_NOZORDER | SWP_SHOWWINDOW);
+        SetWindowPos (Ctl (hwnd, IDC_GROUP_EXPAND_BASE + g), nullptr, 400, y, 86, 24,
+                      SWP_NOZORDER | SWP_SHOWWINDOW);
+        y += 26;
+        const int rows = (grp.count + 1) / 2;
+        for (int j = 0; j < grp.count; ++j)
+        {
+            HWND member = Ctl (hwnd, IDC_FILTER_BASE + grp.first + j);
+            if (g_groupOpen[g])
+            {
+                const int col = j % 2, row = j / 2;
+                SetWindowPos (member, nullptr, 32 + col * 237, y + row * 26,
+                              col == 0 ? 225 : 221, 24, SWP_NOZORDER | SWP_SHOWWINDOW);
+            }
+            else ShowWindow (member, SW_HIDE);
+        }
+        if (g_groupOpen[g]) y += rows * 26;
+        UpdateGroupHeader (hwnd, g);
+    }
+    SetWindowPos (Ctl (hwnd, IDC_VERSION_LABEL), nullptr, 16, y + 12, 200, 20, SWP_NOZORDER);
+    SetWindowPos (Ctl (hwnd, IDC_UPDATE_BUTTON), nullptr, 366, y + 8, 120, 26, SWP_NOZORDER);
+    SetWindowPos (hwnd, nullptr, 0, 0, 540, y + 12 + 26 + 36,
+                  SWP_NOMOVE | SWP_NOZORDER);
+}
+
 void UpdateStatus (HWND hwnd, const std::wstring& prefix)
 {
     std::wstring text;
@@ -282,7 +355,7 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                  reinterpret_cast<HMENU> ((INT_PTR) IDC_STATUS),
                                  nullptr, nullptr));
 
-            AddLabel (hwnd, L"フィルター（ボタンでON/OFF、そのまま音で比べられます）", 16, 342, 470);
+            AddLabel (hwnd, L"フィルター（グループ一括ON/OFF、開くと個別に切替）", 16, 342, 470);
             {
                 HWND dry = make (CreateWindowW (L"BUTTON", L"",
                                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX | BS_PUSHLIKE,
@@ -291,12 +364,26 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                                 nullptr, nullptr));
                 SetToggleText (dry, false, L"ドライ（全フィルターOFFの音を聞く）");
             }
+            // Group headers + member toggles; LayoutFilters() positions
+            // everything (members of closed groups start hidden).
+            for (int g = 0; g < kNumGroups; ++g)
+            {
+                make (CreateWindowW (L"BUTTON", L"",
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                     0, 0, 10, 10, hwnd,
+                                     reinterpret_cast<HMENU> ((INT_PTR) (IDC_GROUP_BASE + g)),
+                                     nullptr, nullptr));
+                make (CreateWindowW (L"BUTTON", L"",
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                     0, 0, 10, 10, hwnd,
+                                     reinterpret_cast<HMENU> ((INT_PTR) (IDC_GROUP_EXPAND_BASE + g)),
+                                     nullptr, nullptr));
+            }
             for (int i = 0; i < kNumFilters; ++i)
             {
-                const int col = i % 2, row = i / 2;
                 HWND cb = make (CreateWindowW (L"BUTTON", L"",
-                                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX | BS_PUSHLIKE,
-                                               16 + col * 245, 394 + row * 26, 240, 24, hwnd,
+                                               WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX | BS_PUSHLIKE,
+                                               0, 0, 10, 10, hwnd,
                                                reinterpret_cast<HMENU> ((INT_PTR) (IDC_FILTER_BASE + i)),
                                                nullptr, nullptr));
                 SendMessageW (cb, BM_SETCHECK, kFilterDefs[i].defOn ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -321,12 +408,16 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             {
                 wchar_t vbuf[64];
                 swprintf_s (vbuf, L"バージョン %hs", STRING_VERSION);
-                AddLabel (hwnd, vbuf, 16, 620, 200);
+                make (CreateWindowW (L"STATIC", vbuf, WS_CHILD | WS_VISIBLE,
+                                     16, 620, 200, 20, hwnd,
+                                     reinterpret_cast<HMENU> ((INT_PTR) IDC_VERSION_LABEL),
+                                     nullptr, nullptr));
                 make (CreateWindowW (L"BUTTON", L"更新を確認", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                      366, 616, 120, 26, hwnd,
                                      reinterpret_cast<HMENU> ((INT_PTR) IDC_UPDATE_BUTTON),
                                      nullptr, nullptr));
             }
+            LayoutFilters (hwnd);
             SetTimer (hwnd, kTimerId, 50, nullptr);
             CheckForUpdateAsync (hwnd, false); // silent auto-check on launch
             PostMessageW (hwnd, WM_AUTOSTART_MSG, 0, 0); // engine always on
@@ -430,12 +521,41 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 miclog::Write ("app: dry(bypass) = %d", dry ? 1 : 0);
                 return 0;
             }
+            if (LOWORD (wp) >= IDC_GROUP_BASE && LOWORD (wp) < IDC_GROUP_BASE + kNumGroups)
+            {
+                const int g = LOWORD (wp) - IDC_GROUP_BASE;
+                const FilterGroupDef& grp = kFilterGroups[g];
+                int on = 0;
+                for (int j = 0; j < grp.count; ++j)
+                    if (IsChecked (hwnd, IDC_FILTER_BASE + grp.first + j)) ++on;
+                const bool target = on != grp.count; // all on -> off, otherwise on
+                for (int j = 0; j < grp.count; ++j)
+                {
+                    const int i = grp.first + j;
+                    SendMessageW (Ctl (hwnd, IDC_FILTER_BASE + i), BM_SETCHECK,
+                                  target ? BST_CHECKED : BST_UNCHECKED, 0);
+                    g_engine.SetParameter ((unsigned int) kFilterDefs[i].paramId, target ? 1.0 : 0.0);
+                    SetToggleText (Ctl (hwnd, IDC_FILTER_BASE + i), target, kFilterDefs[i].label);
+                }
+                UpdateGroupHeader (hwnd, g);
+                miclog::Write ("app: filter group %d -> %d", g, target ? 1 : 0);
+                return 0;
+            }
+            if (LOWORD (wp) >= IDC_GROUP_EXPAND_BASE && LOWORD (wp) < IDC_GROUP_EXPAND_BASE + kNumGroups)
+            {
+                const int g = LOWORD (wp) - IDC_GROUP_EXPAND_BASE;
+                g_groupOpen[g] = !g_groupOpen[g];
+                LayoutFilters (hwnd);
+                return 0;
+            }
             if (LOWORD (wp) >= IDC_FILTER_BASE && LOWORD (wp) < IDC_FILTER_BASE + kNumFilters)
             {
                 const int i = LOWORD (wp) - IDC_FILTER_BASE;
                 const bool on = IsChecked (hwnd, IDC_FILTER_BASE + i);
                 g_engine.SetParameter ((unsigned int) kFilterDefs[i].paramId, on ? 1.0 : 0.0);
                 SetToggleText (Ctl (hwnd, IDC_FILTER_BASE + i), on, kFilterDefs[i].label);
+                const int g = GroupOfFilter (i);
+                if (g >= 0) UpdateGroupHeader (hwnd, g);
                 miclog::Write ("app: filter param %d -> %d", kFilterDefs[i].paramId, on ? 1 : 0);
                 return 0;
             }

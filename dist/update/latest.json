@@ -1,6 +1,6 @@
 {
-  "version": "0.12.0",
-  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.12.0.zip",
-  "sha256": "bebee9c8866a51e5cc66a00975a3fed4d459a97f42c4c3e7337b958cb4213d14",
-  "notes": "停止チェックを追加（常時動作はそのまま）。フィルターはボタン式"
+  "version": "0.13.0",
+  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.13.0.zip",
+  "sha256": "f5abec6e6cf19162ebecabf7c3463b6def8bca00d4fdfd1f574344900d893137",
+  "notes": "フィルターを4グループ化（まとめてON/OFF、開いて個別にも切替可）"
 }
