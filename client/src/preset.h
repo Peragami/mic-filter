@@ -53,12 +53,6 @@ inline constexpr int kNumFilterInfos =
 const FilterInfo* FindFilter (const std::string& key);
 const wchar_t* StageLabel (const std::string& key); // label for the order list
 
-struct PresetGroup
-{
-    std::wstring name;
-    std::vector<std::string> filters; // FilterInfo keys
-};
-
 // One adjustable knob of a filter, backed by an existing plugin
 // parameter (range/default come from MicFilterParams::rangeFor).
 // format: 0 = integer, 1 = one decimal, 2 = two decimals,
@@ -92,9 +86,8 @@ inline const KnobDef kKnobs[] = {
 inline constexpr int kNumKnobs = (int) (sizeof (kKnobs) / sizeof (kKnobs[0]));
 const KnobDef* FindKnob (const std::string& valueKey);
 
-// A named run of consecutive stages in the chain view ("block").
-// Separate concept from PresetGroup: groups organize filters, blocks
-// bundle neighbours in the application order so they move together.
+// A named run of consecutive stages in the chain view ("block"):
+// blocks bundle neighbours in the application order so they move together.
 // Invariant (enforced by Normalized): members are consecutive in
 // `order`, unique across blocks, and there are at least 1 of them.
 struct OrderBlock
@@ -109,14 +102,13 @@ struct Preset
     std::wstring name;
     std::map<std::string, bool> on;        // every registry key
     std::map<std::string, double> values;  // every knob valueKey (plain units)
-    std::vector<PresetGroup> groups;       // a partition of all keys
     std::vector<std::string> order;        // stage keys (stage >= 0), a permutation
     std::vector<OrderBlock> blocks;        // consecutive runs inside order
 };
 
 Preset DefaultPreset();
 // Repair a parsed preset: unknown keys dropped, missing keys filled
-// with defaults, groups made a partition, order made a permutation.
+// with defaults, order made a permutation.
 Preset Normalized (Preset p);
 bool PresetIsValid (const Preset& p);
 

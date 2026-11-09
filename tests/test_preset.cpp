@@ -25,12 +25,6 @@ int main()
     p.name = L"配信テスト";
     p.on["rnnoise"] = true;
     p.on["gate"] = false;
-    p.groups = { { L"全部", {} }, { L"カスタム グループ", { "eq" } } };
-    for (int i = 0; i < kNumFilterInfos; ++i)
-    {
-        const std::string key = kFilterRegistry[i].key;
-        if (key != "eq") p.groups[0].filters.push_back (key);
-    }
     p.order = { "limiter", "comp", "gate", "multiband", "eq", "spectral",
                 "rnnoise", "hum", "hpf", "duck", "declick", "declip",
                 "deesser", "exciter", "bwe" };
@@ -41,10 +35,6 @@ int main()
     CHECK (q.name == L"配信テスト");
     CHECK (q.on.at ("rnnoise") == true);
     CHECK (q.on.at ("gate") == false);
-    CHECK (q.groups.size() == 2);
-    CHECK (q.groups[1].name == L"カスタム グループ");
-    CHECK (q.groups[1].filters.size() == 1 && q.groups[1].filters[0] == "eq");
-    CHECK (q.groups[0].filters.size() == 15);
     CHECK (q.order == p.order);
     CHECK (PresetIsValid (q));
 
@@ -70,16 +60,18 @@ int main()
     // Broken input gets repaired, not rejected.
     Preset broken;
     CHECK (ParsePreset ("{\"name\": \"x\", \"on\": {\"gate\": false, \"bogus\": true},"
-                        " \"groups\": [], \"order\": [\"limiter\", \"limiter\"]}", broken));
+                        " \"order\": [\"limiter\", \"limiter\"]}", broken));
     const Preset fixed = Normalized (broken);
     CHECK (PresetIsValid (fixed));
     CHECK (fixed.on.at ("gate") == false);       // kept
     CHECK (fixed.on.count ("bogus") == 0);        // dropped
     CHECK (fixed.order.size() == 15);
     CHECK (fixed.order[0] == "limiter");          // user's head kept
-    size_t grouped = 0;
-    for (const auto& g : fixed.groups) grouped += g.filters.size();
-    CHECK (grouped == (size_t) kNumFilterInfos);  // everything grouped
+
+    // Legacy files carrying the removed "groups" field still parse.
+    Preset legacy;
+    CHECK (ParsePreset ("{\"name\": \"old\", \"groups\": [{\"name\": \"g\","
+                        " \"filters\": [\"eq\"]}]}", legacy));
 
     // Blocks round-trip; non-consecutive blocks are dissolved.
     {

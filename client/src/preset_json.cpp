@@ -202,12 +202,6 @@ Preset DefaultPreset()
     p.name = L"標準";
     for (int i = 0; i < kNumFilterInfos; ++i)
         p.on[kFilterRegistry[i].key] = kFilterRegistry[i].defOn;
-    p.groups = {
-        { L"ノイズ除去", { "hum", "multiband", "spectral", "rnnoise" } },
-        { L"声を整える", { "hpf", "eq", "deesser", "exciter", "bwe" } },
-        { L"音量を揃える", { "gate", "breath", "comp", "limiter" } },
-        { L"音の修復", { "duck", "declick", "declip" } },
-    };
     p.order.assign (std::begin (kStageKeysInDefaultOrder), std::end (kStageKeysInDefaultOrder));
     return p;
 }
@@ -238,29 +232,6 @@ Preset Normalized (Preset p)
         values[k.valueKey] = v;
     }
     p.values = values;
-
-    // groups: keep known keys once; leftovers go to a trailing group.
-    std::set<std::string> placed;
-    std::vector<PresetGroup> groups;
-    for (auto& g : p.groups)
-    {
-        PresetGroup clean;
-        clean.name = g.name.empty() ? L"グループ" : g.name;
-        for (const auto& key : g.filters)
-            if (FindFilter (key) && placed.insert (key).second)
-                clean.filters.push_back (key);
-        groups.push_back (clean); // empty groups are kept (editor creates them first)
-    }
-    std::vector<std::string> leftovers;
-    for (int i = 0; i < kNumFilterInfos; ++i)
-        if (!placed.count (kFilterRegistry[i].key)) leftovers.push_back (kFilterRegistry[i].key);
-    if (!leftovers.empty())
-    {
-        if (groups.empty()) groups.push_back ({ L"フィルター", leftovers });
-        else groups.back().filters.insert (groups.back().filters.end(),
-                                           leftovers.begin(), leftovers.end());
-    }
-    p.groups = groups;
 
     // order: permutation of the stage keys, missing ones appended in
     // the default relative order.
@@ -313,10 +284,7 @@ Preset Normalized (Preset p)
 bool PresetIsValid (const Preset& p)
 {
     const Preset n = Normalized (p);
-    if (n.on.size() != p.on.size() || n.order.size() != p.order.size()) return false;
-    size_t grouped = 0;
-    for (const auto& g : p.groups) grouped += g.filters.size();
-    return grouped == (size_t) kNumFilterInfos;
+    return n.on.size() == p.on.size() && n.order.size() == p.order.size();
 }
 
 std::vector<int> StageOrderIds (const Preset& p)
@@ -378,16 +346,7 @@ std::string SerializePreset (const Preset& p)
         first = false;
         s += "\"" + key + "\": " + num;
     }
-    s += " },\n  \"groups\": [";
-    for (size_t g = 0; g < p.groups.size(); ++g)
-    {
-        s += g ? ",\n    " : "\n    ";
-        s += "{ \"name\": \"" + JsonEscape (WideToUtf8 (p.groups[g].name)) + "\", \"filters\": [";
-        for (size_t j = 0; j < p.groups[g].filters.size(); ++j)
-            s += (j ? ", " : "") + std::string ("\"") + p.groups[g].filters[j] + "\"";
-        s += "] }";
-    }
-    s += "\n  ],\n  \"blocks\": [";
+    s += " },\n  \"blocks\": [";
     for (size_t g = 0; g < p.blocks.size(); ++g)
     {
         s += g ? ",\n    " : "\n    ";
@@ -419,37 +378,6 @@ bool ParsePreset (const std::string& json, Preset& out)
         out.on = CollectBoolPairs (json, b, e);
     if (FindValueRegion (json, "values", '{', '}', b, e))
         out.values = CollectNumberPairs (json, b, e);
-
-    if (FindValueRegion (json, "groups", '[', ']', b, e))
-    {
-        // Split the array into top-level objects and parse each.
-        size_t i = b;
-        while (i < e)
-        {
-            const size_t ob = json.find ('{', i);
-            if (ob == std::string::npos || ob >= e) break;
-            // matching close brace (strings skipped)
-            int depth = 0; bool inStr = false, esc = false; size_t oe = e;
-            for (size_t j = ob; j < e; ++j)
-            {
-                const char c = json[j];
-                if (inStr) { if (esc) esc = false; else if (c == '\\') esc = true; else if (c == '"') inStr = false; continue; }
-                if (c == '"') inStr = true;
-                else if (c == '{') ++depth;
-                else if (c == '}' && --depth == 0) { oe = j + 1; break; }
-            }
-            const std::string obj = json.substr (ob, oe - ob);
-            PresetGroup g;
-            std::string gname;
-            if (updatecheck::jsonStringField (obj, "name", gname))
-                g.name = Utf8ToWideLocal (JsonUnescape (gname));
-            size_t fb = 0, fe = 0;
-            if (FindValueRegion (obj, "filters", '[', ']', fb, fe))
-                g.filters = CollectStrings (obj, fb, fe);
-            out.groups.push_back (g);
-            i = oe;
-        }
-    }
 
     if (FindValueRegion (json, "blocks", '[', ']', b, e))
     {

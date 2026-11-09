@@ -1,8 +1,9 @@
 // settings_window.cpp -- see settings_window.h.
-// v0.16: one unified chain view. Rows are the DSP stages in application
-// order; each row carries its on/off toggle, its group tag, and its
-// knobs (sliders for the filter's value parameters). Groups are managed
-// from the bar above the list. Everything autosaves.
+// One unified chain view. Rows are the DSP stages in application
+// order; each row carries its on/off toggle and its knobs (sliders
+// for the filter's value parameters). Rows are reordered by dragging;
+// consecutive rows can be bundled into named order blocks. Everything
+// autosaves. (Filter groups were removed in v0.18.)
 #include "settings_window.h"
 
 #include <algorithm>
@@ -24,13 +25,6 @@ constexpr int S_PRESET_LIST = 2001;
 constexpr int S_PRESET_NEW = 2002;
 constexpr int S_PRESET_RENAME = 2003;
 constexpr int S_PRESET_DELETE = 2004;
-constexpr int S_GROUP_COMBO = 2005;
-constexpr int S_GROUP_ADD = 2006;
-constexpr int S_GROUP_RENAME = 2007;
-constexpr int S_GROUP_DELETE = 2008;
-constexpr int S_GROUP_ALL_ON = 2009;
-constexpr int S_GROUP_ALL_OFF = 2010;
-constexpr int S_MOVE_BUTTON = 2011;
 constexpr int S_BLOCK_CREATE = 2012;
 constexpr int S_APPLY = 2017;
 constexpr int S_CLOSE = 2018;
@@ -51,7 +45,7 @@ const char* kSlotKeys[kNumSlots] = {
 
 struct RowControls
 {
-    HWND toggle = nullptr, tag = nullptr;
+    HWND toggle = nullptr;
     HWND breath = nullptr;              // gate row only
     HWND knobLabel[3] = {};
     HWND knobSlider[3] = {};
@@ -122,14 +116,6 @@ void NotifyMainSelect (const std::wstring& name)
     if (g_parent)
         PostMessageW (g_parent, WM_PRESET_CHANGED, 0,
                       reinterpret_cast<LPARAM> (new std::wstring (name)));
-}
-
-std::wstring GroupNameOf (const std::string& key)
-{
-    for (const auto& g : g_edit.groups)
-        for (const auto& k : g.filters)
-            if (k == key) return g.name;
-    return L"";
 }
 
 void SetToggleText (HWND button, bool on, const wchar_t* label)
@@ -350,14 +336,11 @@ void LayoutRows()
         const int xoff = BlockOf (item.key) >= 0 ? 16 : 0;
         SetWindowPos (r.toggle, nullptr, 6 + xoff, y, 206, 42, SWP_NOZORDER | SWP_SHOWWINDOW);
         if (r.breath)
-        {
-            SetWindowPos (r.breath, nullptr, 226 + xoff, y, 128, 20, SWP_NOZORDER | SWP_SHOWWINDOW);
-            SetWindowPos (r.tag, nullptr, 226 + xoff, y + 23, 128, 16, SWP_NOZORDER | SWP_SHOWWINDOW);
-        }
-        else SetWindowPos (r.tag, nullptr, 226 + xoff, y + 12, 128, 16, SWP_NOZORDER | SWP_SHOWWINDOW);
+            SetWindowPos (r.breath, nullptr, 226 + xoff, y + 12, 128, 20, SWP_NOZORDER | SWP_SHOWWINDOW);
+        const int knobStart = r.breath ? 362 : 226;
         for (int j = 0; j < r.knobCount; ++j)
         {
-            const int x = 362 + xoff + j * 124;
+            const int x = knobStart + xoff + j * 124;
             SetWindowPos (r.knobLabel[j], nullptr, x, y, 120, 13, SWP_NOZORDER | SWP_SHOWWINDOW);
             SetWindowPos (r.knobSlider[j], nullptr, x, y + 14, 120, 28, SWP_NOZORDER | SWP_SHOWWINDOW);
         }
@@ -379,7 +362,6 @@ void LayoutRows()
         if (shownSlots.count (s)) continue;
         RowControls& r = g_rows[s];
         ShowWindow (r.toggle, SW_HIDE);
-        ShowWindow (r.tag, SW_HIDE);
         if (r.breath) ShowWindow (r.breath, SW_HIDE);
         for (int j = 0; j < r.knobCount; ++j)
         {
@@ -401,7 +383,6 @@ void RefreshChain()
         const bool on = it != g_edit.on.end() && it->second;
         SendMessageW (r.toggle, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
         SetToggleText (r.toggle, on, info ? info->label : L"?");
-        SetWindowTextW (r.tag, GroupNameOf (key).c_str());
         for (int j = 0; j < r.knobCount; ++j)
         {
             const KnobDef& def = *r.knobs[j];
@@ -421,23 +402,6 @@ void RefreshChain()
         SetToggleText (b, on, L"吐息キープ");
     }
     LayoutRows();
-}
-
-void RefreshGroupCombo (int select = -2)
-{
-    HWND combo = SCtl (S_GROUP_COMBO);
-    const LRESULT cur = select == -2 ? SendMessageW (combo, CB_GETCURSEL, 0, 0) : select;
-    SendMessageW (combo, CB_RESETCONTENT, 0, 0);
-    for (const auto& g : g_edit.groups)
-        SendMessageW (combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM> (g.name.c_str()));
-    if (!g_edit.groups.empty())
-        SendMessageW (combo, CB_SETCURSEL, std::clamp ((int) cur, 0, (int) g_edit.groups.size() - 1), 0);
-}
-
-int SelectedGroup()
-{
-    const LRESULT sel = SendMessageW (SCtl (S_GROUP_COMBO), CB_GETCURSEL, 0, 0);
-    return sel == CB_ERR ? -1 : (int) sel;
 }
 
 void RefreshPresetList (const std::wstring& selectName)
@@ -472,7 +436,6 @@ void LoadIntoEditor (const std::wstring& name)
     g_editIsMainCurrent = g_edit.name == g_mainCurrent;
     g_selKey = "gate";
     g_scroll = 0;
-    RefreshGroupCombo (-1);
     RefreshChain();
     wchar_t title[320];
     swprintf_s (title, L"フィルター設定 - %s", g_edit.name.c_str());
@@ -692,7 +655,6 @@ void CreateChainRows (HWND panel)
         const std::string key = kSlotKeys[s];
         r.toggle = mk (L"BUTTON", L"", WS_TABSTOP | BS_AUTOCHECKBOX | BS_PUSHLIKE, RowId (s, 2));
         SetWindowSubclass (r.toggle, DragSubclassProc, 0, (DWORD_PTR) s);
-        r.tag = mk (L"STATIC", L"", 0, 0);
         if (key == "gate")
             r.breath = mk (L"BUTTON", L"", WS_TABSTOP | BS_AUTOCHECKBOX | BS_PUSHLIKE, RowId (s, 3));
         for (int i = 0; i < kNumKnobs && r.knobCount < 3; ++i)
@@ -784,68 +746,6 @@ void OnPresetDelete()
     }
     RefreshPresetList (next);
     LoadIntoEditor (next);
-}
-
-void OnGroupAdd()
-{
-    std::wstring name;
-    if (!PromptText (g_win, L"新規グループ", L"", name)) return;
-    g_edit.groups.push_back ({ name, {} });
-    Commit();
-    RefreshGroupCombo ((int) g_edit.groups.size() - 1);
-    RefreshChain();
-}
-
-void OnGroupRename()
-{
-    const int g = SelectedGroup();
-    if (g < 0) return;
-    std::wstring name;
-    if (!PromptText (g_win, L"グループ名の変更", g_edit.groups[(size_t) g].name, name)) return;
-    g_edit.groups[(size_t) g].name = name;
-    Commit();
-    RefreshGroupCombo (g);
-    RefreshChain();
-}
-
-void OnGroupDelete()
-{
-    const int g = SelectedGroup();
-    if (g < 0) return;
-    if (MessageBoxW (g_win, L"グループを削除しますか？（中のフィルターは別のグループへ移ります）",
-                     L"MicFilter", MB_YESNO | MB_ICONQUESTION) != IDYES)
-        return;
-    std::vector<std::string> moving = g_edit.groups[(size_t) g].filters;
-    g_edit.groups.erase (g_edit.groups.begin() + g);
-    if (g_edit.groups.empty())
-        g_edit.groups.push_back ({ L"フィルター", {} });
-    auto& dest = g_edit.groups[0].filters;
-    dest.insert (dest.end(), moving.begin(), moving.end());
-    Commit();
-    RefreshGroupCombo (0);
-    RefreshChain();
-}
-
-void OnGroupAll (bool on)
-{
-    const int g = SelectedGroup();
-    if (g < 0) return;
-    for (const auto& key : g_edit.groups[(size_t) g].filters)
-        g_edit.on[key] = on;
-    Commit();
-    RefreshChain();
-}
-
-void OnMoveSelectedRow()
-{
-    const int g = SelectedGroup();
-    if (g < 0) return;
-    for (auto& grp : g_edit.groups)
-        grp.filters.erase (std::remove (grp.filters.begin(), grp.filters.end(), g_selKey),
-                           grp.filters.end());
-    g_edit.groups[(size_t) g].filters.push_back (g_selKey);
-    Commit();
-    RefreshChain();
 }
 
 void OnBlockCreate()
@@ -962,20 +862,8 @@ LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             button (L"名前変更", S_PRESET_RENAME, 74, 518, 68);
             button (L"削除", S_PRESET_DELETE, 146, 518, 50);
 
-            label (L"グループ（選択中グループへの操作）", 212, 10, 400);
-            make (CreateWindowW (L"COMBOBOX", L"",
-                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
-                                 212, 32, 200, 200, hwnd,
-                                 reinterpret_cast<HMENU> ((INT_PTR) S_GROUP_COMBO), nullptr, nullptr));
-            button (L"追加", S_GROUP_ADD, 418, 31, 52, 25);
-            button (L"名前変更", S_GROUP_RENAME, 474, 31, 68, 25);
-            button (L"削除", S_GROUP_DELETE, 546, 31, 52, 25);
-            button (L"全ON", S_GROUP_ALL_ON, 610, 31, 58, 25);
-            button (L"全OFF", S_GROUP_ALL_OFF, 672, 31, 62, 25);
-            button (L"選択行をこのグループへ", S_MOVE_BUTTON, 746, 31, 168, 25);
-
-            label (L"並び順ブロック（フィルターのボタン／ブロック名をドラッグで移動）", 212, 62, 500);
-            button (L"選択行からブロック作成", S_BLOCK_CREATE, 746, 60, 168, 25);
+            label (L"並び順ブロック（フィルターのボタン／ブロック名をドラッグで移動）", 212, 10, 500);
+            button (L"選択行からブロック作成", S_BLOCK_CREATE, 746, 8, 168, 25);
 
             static bool panelRegistered = false;
             if (!panelRegistered)
@@ -991,7 +879,7 @@ LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             g_panel = CreateWindowW (L"MicFilterChainPanel", L"",
                                      WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL,
-                                     212, 92, 764, 518, hwnd, nullptr,
+                                     212, 40, 764, 570, hwnd, nullptr,
                                      GetModuleHandleW (nullptr), nullptr);
             CreateChainRows (g_panel);
 
@@ -1036,12 +924,6 @@ LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 case S_PRESET_NEW: OnPresetNew(); return 0;
                 case S_PRESET_RENAME: OnPresetRename(); return 0;
                 case S_PRESET_DELETE: OnPresetDelete(); return 0;
-                case S_GROUP_ADD: OnGroupAdd(); return 0;
-                case S_GROUP_RENAME: OnGroupRename(); return 0;
-                case S_GROUP_DELETE: OnGroupDelete(); return 0;
-                case S_GROUP_ALL_ON: OnGroupAll (true); return 0;
-                case S_GROUP_ALL_OFF: OnGroupAll (false); return 0;
-                case S_MOVE_BUTTON: OnMoveSelectedRow(); return 0;
                 case S_BLOCK_CREATE: OnBlockCreate(); return 0;
                 case S_APPLY:
                     g_mainCurrent = g_edit.name;
