@@ -62,6 +62,8 @@ tresult PLUGIN_API Controller::initialize (FUnknown* context)
     addSwitch (MP::kDuckOn, STR16 ("Click Duck On"));
     addSwitch (MP::kBreathOn, STR16 ("Breath Keep On"));
     addSwitch (MP::kRnnoiseOn, STR16 ("AI Noise Removal On"));
+    addSwitch (MP::kBweOn, STR16 ("AI Bandwidth Ext On"));
+    addRange (MP::kBweAmount, STR16 ("AI Bandwidth Amount"), STR16 ("BWE"), STR16 (""));
     // Bypass: flagged so hosts wire their own bypass button to it.
     {
         auto* p = new Vst::StringListParameter (STR16 ("Bypass"), MP::kBypass, nullptr,

@@ -91,6 +91,8 @@ void Processor::syncChainParams ()
     p.duck.on = onOf (values_, MicFilterParams::kDuckOn);
     p.breath.on = onOf (values_, MicFilterParams::kBreathOn);
     p.rnnoise.on = onOf (values_, MicFilterParams::kRnnoiseOn);
+    p.bwe.on = onOf (values_, MicFilterParams::kBweOn);
+    p.bwe.amount = plainOf (values_, MicFilterParams::kBweAmount);
     chain_.setParams (p);
     paramsDirty_ = false;
 }

@@ -38,6 +38,8 @@ enum ParamID : unsigned int
     kDuckOn,          // click/keyboard transient ducking
     kBreathOn,        // gate breath mode (keep quiet breath sounds)
     kRnnoiseOn,       // AI noise removal (RNNoise), default Off: +480 samples latency
+    kBweOn,           // AI bandwidth extension, default Off: +480 samples latency
+    kBweAmount,
     kNumParams
 };
 
@@ -81,6 +83,8 @@ inline const Range& rangeFor (int id)
         {   0.0f,   1.0f,   1.0f }, // kDuckOn
         {   0.0f,   1.0f,   0.0f }, // kBreathOn
         {   0.0f,   1.0f,   0.0f }, // kRnnoiseOn
+        {   0.0f,   1.0f,   0.0f }, // kBweOn
+        {   0.0f,   1.5f,   1.0f }, // kBweAmount
     };
     return ranges[id];
 }
@@ -103,7 +107,7 @@ inline bool isSwitch (int id)
     return id == kHpfOn || id == kGateOn || id == kEqOn || id == kCompOn || id == kLimiterOn
         || id == kBypass || id == kHumOn || id == kDeclipOn || id == kDeclickOn
         || id == kMultibandOn || id == kDeesserOn || id == kExciterOn || id == kSpectralOn
-        || id == kDuckOn || id == kBreathOn || id == kRnnoiseOn;
+        || id == kDuckOn || id == kBreathOn || id == kRnnoiseOn || id == kBweOn;
 }
 
 } // namespace MicFilterParams

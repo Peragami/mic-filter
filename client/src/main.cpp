@@ -44,7 +44,8 @@ constexpr FilterDef kFilterDefs[] = {
     { MicFilterParams::kGateOn,      L"ノイズゲート", true },
     { MicFilterParams::kMultibandOn, L"ノイズ抑制（帯域別）", true },
     { MicFilterParams::kSpectralOn,  L"ヒス除去（スペクトル減算）", false },
-    { MicFilterParams::kRnnoiseOn,   L"AIノイズ除去（RNNoise）", false }, // +10.7ms latency when ON
+    { MicFilterParams::kRnnoiseOn,   L"AIノイズ除去（RNNoise）", false },
+    { MicFilterParams::kBweOn,       L"AI帯域拡張（声のツヤ・超解像）", false }, // +10.7ms latency when ON
     { MicFilterParams::kEqOn,        L"EQ（音質補正）", true },
     { MicFilterParams::kDuckOn,      L"クリック音カット（マウス/キー）", true },
     { MicFilterParams::kBreathOn,    L"吐息キープ（息の音を残す）", false },
@@ -717,7 +718,7 @@ int APIENTRY wWinMain (HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow)
 
     HWND hwnd = CreateWindowW (wc.lpszClassName, L"MicFilter クライアント",
                                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                               CW_USEDEFAULT, CW_USEDEFAULT, 540, 720,
+                               CW_USEDEFAULT, CW_USEDEFAULT, 540, 750,
                                nullptr, nullptr, hInst, nullptr);
     if (!hwnd) return 1;
     ShowWindow (hwnd, nShow);

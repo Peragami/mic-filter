@@ -16,6 +16,7 @@
 #include "PureDsp.h"
 #include "SpectralSub.h"
 #include "RnnoiseStage.h"
+#include "BweStage.h"
 #include <cmath>
 #include <algorithm>
 
@@ -522,6 +523,7 @@ struct Params2
     TransientDuckParams duck;
     BreathParams breath;
     RnnoiseParams rnnoise; // default OFF (opt-in AI noise removal; +480 samples latency)
+    BweParams bwe;         // default OFF (opt-in AI bandwidth extension; +480 samples)
 };
 
 struct ChainV2
@@ -532,10 +534,11 @@ struct ChainV2
     SpectralSub spectral;
     TransientDuck duck;
     RnnoiseStage rnnoiseStage;
+    BweStage bweStage;
     Params2 p; double sr = 48000;
     float gateEnv=0, gateGain=1, compEnv=0;
 
-    void prepare (double sampleRate) { sr = sampleRate; update(); declip.reset(); declick.reset(); spectral.reset(); duck.reset(); rnnoiseStage.reset(); }
+    void prepare (double sampleRate) { sr = sampleRate; update(); declip.reset(); declick.reset(); spectral.reset(); duck.reset(); rnnoiseStage.reset(); bweStage.reset(); }
     ~ChainV2() { rnnoiseStage.release(); }
     void setParams (const Params2& np) { p = np; update(); }
     void update()
@@ -553,12 +556,13 @@ struct ChainV2
         spectral.setParams (p.spectral);
         duck.prepare (sr, p.duck);
         rnnoiseStage.setParams (p.rnnoise);
+        bweStage.prepare (sr, p.bwe);
     }
     int latencySamples() const
     {
         return (p.declip.on ? DeClipper::kDelay : 0) + (p.declick.on ? DeClicker::kLookahead : 0)
              + spectral.latencySamples() + (p.duck.on ? TransientDuck::kLookahead : 0)
-             + rnnoiseStage.latencySamples();
+             + rnnoiseStage.latencySamples() + bweStage.latencySamples();
     }
     inline float processSample (float x)
     {
@@ -598,6 +602,7 @@ struct ChainV2
             }
         }
         x = exciter.process (x);
+        x = bweStage.process (x);
         if (p.base.limiterOn) x = clampf (x, -0.89f, 0.89f);
         return x * dbToGain (p.base.outputGainDb);
     }
