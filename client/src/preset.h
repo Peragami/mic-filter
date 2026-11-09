@@ -59,10 +59,44 @@ struct PresetGroup
     std::vector<std::string> filters; // FilterInfo keys
 };
 
+// One adjustable knob of a filter, backed by an existing plugin
+// parameter (range/default come from MicFilterParams::rangeFor).
+// format: 0 = integer, 1 = one decimal, 2 = two decimals,
+//         3 = percent (value x 100), 4 = ratio "x.x:1"
+struct KnobDef
+{
+    const char* filterKey;
+    const char* valueKey;
+    int paramId;
+    const wchar_t* label;
+    const wchar_t* unit;
+    float step;
+    int format;
+};
+
+inline const KnobDef kKnobs[] = {
+    { "hum",      "humBase",          MicFilterParams::kHumBase,          L"電源周波数", L"Hz", 10.0f, 0 },
+    { "spectral", "spectralStrength", MicFilterParams::kSpectralStrength, L"強さ", L"", 0.05f, 2 },
+    { "hpf",      "hpfFreq",          MicFilterParams::kHpfFreq,          L"カット周波数", L"Hz", 1.0f, 0 },
+    { "eq",       "eqLow",            MicFilterParams::kEqLow,            L"低音", L"dB", 0.5f, 1 },
+    { "eq",       "eqMid",            MicFilterParams::kEqMid,            L"中音", L"dB", 0.5f, 1 },
+    { "eq",       "eqHigh",           MicFilterParams::kEqHigh,           L"高音", L"dB", 0.5f, 1 },
+    { "deesser",  "deesserThresh",    MicFilterParams::kDeesserThresh,    L"しきい値", L"dB", 1.0f, 0 },
+    { "exciter",  "exciterMix",       MicFilterParams::kExciterMix,       L"量", L"", 0.01f, 3 },
+    { "bwe",      "bweAmount",        MicFilterParams::kBweAmount,        L"量", L"", 0.05f, 3 },
+    { "gate",     "gateThresh",       MicFilterParams::kGateThresh,       L"しきい値", L"dB", 1.0f, 0 },
+    { "comp",     "compThresh",       MicFilterParams::kCompThresh,       L"しきい値", L"dB", 1.0f, 0 },
+    { "comp",     "compRatio",        MicFilterParams::kCompRatio,        L"レシオ", L"", 0.5f, 4 },
+    { "declick",  "declickThresh",    MicFilterParams::kDeclickThresh,    L"感度", L"", 0.01f, 2 },
+};
+inline constexpr int kNumKnobs = (int) (sizeof (kKnobs) / sizeof (kKnobs[0]));
+const KnobDef* FindKnob (const std::string& valueKey);
+
 struct Preset
 {
     std::wstring name;
     std::map<std::string, bool> on;        // every registry key
+    std::map<std::string, double> values;  // every knob valueKey (plain units)
     std::vector<PresetGroup> groups;       // a partition of all keys
     std::vector<std::string> order;        // stage keys (stage >= 0), a permutation
 };

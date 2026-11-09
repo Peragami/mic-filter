@@ -1,6 +1,6 @@
 {
-  "version": "0.15.0",
-  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.15.0.zip",
-  "sha256": "efa0d54e559816598661701e7c9feea8abc302a46f83b5483f05a95091e49744",
-  "notes": "順番リストはONのフィルターだけ表示に変更"
+  "version": "0.16.0",
+  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.16.0.zip",
+  "sha256": "105a1e75f00273a58d89b37b8fad04dec950768ecac4cccc927c0b987a56e585",
+  "notes": "設定ウィンドウを統合ビューに刷新：順番順の一覧にON/OFF・グループ・つまみ（13個）を集約"
 }

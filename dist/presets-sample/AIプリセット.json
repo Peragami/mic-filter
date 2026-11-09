@@ -1,0 +1,11 @@
+{
+  "name": "AIプリセット",
+  "on": { "hum": true, "multiband": false, "spectral": false, "rnnoise": true, "hpf": true, "eq": true, "deesser": true, "exciter": true, "bwe": true, "gate": true, "breath": false, "comp": true, "limiter": true, "duck": true, "declick": true, "declip": true },
+  "groups": [
+    { "name": "ノイズ除去", "filters": ["hum", "multiband", "spectral", "rnnoise"] },
+    { "name": "声を整える", "filters": ["hpf", "eq", "deesser", "exciter", "bwe"] },
+    { "name": "音量を揃える", "filters": ["gate", "breath", "comp", "limiter"] },
+    { "name": "音の修復", "filters": ["duck", "declick", "declip"] }
+  ],
+  "order": ["declip", "declick", "duck", "hpf", "hum", "rnnoise", "spectral", "eq", "multiband", "gate", "deesser", "comp", "exciter", "bwe", "limiter"]
+}

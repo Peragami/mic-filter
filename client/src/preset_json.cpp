@@ -2,6 +2,8 @@
 #include "preset.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <set>
 
 #include "update_check.h" // updatecheck::jsonStringField
@@ -149,12 +151,42 @@ std::map<std::string, bool> CollectBoolPairs (const std::string& json, size_t be
     }
     return out;
 }
+
+// "key": number pairs inside an object region.
+std::map<std::string, double> CollectNumberPairs (const std::string& json, size_t begin, size_t end)
+{
+    std::map<std::string, double> out;
+    size_t i = begin;
+    while (i < end)
+    {
+        const size_t q1 = json.find ('"', i);
+        if (q1 == std::string::npos || q1 >= end) break;
+        const size_t q2 = json.find ('"', q1 + 1);
+        if (q2 == std::string::npos || q2 >= end) break;
+        const std::string key = JsonUnescape (json.substr (q1 + 1, q2 - q1 - 1));
+        const size_t colon = json.find (':', q2);
+        if (colon == std::string::npos || colon >= end) break;
+        const char* start = json.c_str() + colon + 1;
+        char* endp = nullptr;
+        const double v = std::strtod (start, &endp);
+        if (endp != start) { out[key] = v; i = (size_t) (endp - json.c_str()); }
+        else i = q2 + 1;
+    }
+    return out;
+}
 } // namespace
 
 const FilterInfo* FindFilter (const std::string& key)
 {
     for (int i = 0; i < kNumFilterInfos; ++i)
         if (key == kFilterRegistry[i].key) return &kFilterRegistry[i];
+    return nullptr;
+}
+
+const KnobDef* FindKnob (const std::string& valueKey)
+{
+    for (int i = 0; i < kNumKnobs; ++i)
+        if (valueKey == kKnobs[i].valueKey) return &kKnobs[i];
     return nullptr;
 }
 
@@ -191,6 +223,21 @@ Preset Normalized (Preset p)
         on[key] = it != p.on.end() ? it->second : kFilterRegistry[i].defOn;
     }
     p.on = on;
+
+    // values: drop unknown, fill missing with the parameter defaults,
+    // clamp into the parameter range.
+    std::map<std::string, double> values;
+    for (int i = 0; i < kNumKnobs; ++i)
+    {
+        const KnobDef& k = kKnobs[i];
+        const auto& r = MicFilterParams::rangeFor (k.paramId);
+        const auto it = p.values.find (k.valueKey);
+        double v = it != p.values.end() ? it->second : (double) r.def;
+        if (v < r.min) v = r.min;
+        if (v > r.max) v = r.max;
+        values[k.valueKey] = v;
+    }
+    p.values = values;
 
     // groups: keep known keys once; leftovers go to a trailing group.
     std::set<std::string> placed;
@@ -286,6 +333,20 @@ std::string SerializePreset (const Preset& p)
         first = false;
         s += "\"" + key + "\": " + (it != p.on.end() && it->second ? "true" : "false");
     }
+    s += " },\n  \"values\": {";
+    first = true;
+    for (int i = 0; i < kNumKnobs; ++i)
+    {
+        const std::string key = kKnobs[i].valueKey;
+        const auto it = p.values.find (key);
+        const double v = it != p.values.end() ? it->second
+                                              : (double) MicFilterParams::rangeFor (kKnobs[i].paramId).def;
+        char num[32];
+        std::snprintf (num, sizeof (num), "%.10g", v);
+        s += first ? " " : ", ";
+        first = false;
+        s += "\"" + key + "\": " + num;
+    }
     s += " },\n  \"groups\": [";
     for (size_t g = 0; g < p.groups.size(); ++g)
     {
@@ -314,6 +375,8 @@ bool ParsePreset (const std::string& json, Preset& out)
     size_t b = 0, e = 0;
     if (FindValueRegion (json, "on", '{', '}', b, e))
         out.on = CollectBoolPairs (json, b, e);
+    if (FindValueRegion (json, "values", '{', '}', b, e))
+        out.values = CollectNumberPairs (json, b, e);
 
     if (FindValueRegion (json, "groups", '[', ']', b, e))
     {

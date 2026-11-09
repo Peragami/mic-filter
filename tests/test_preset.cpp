@@ -48,6 +48,25 @@ int main()
     CHECK (q.order == p.order);
     CHECK (PresetIsValid (q));
 
+    // Values round-trip + defaults fill.
+    {
+        Preset vp = def;
+        vp.values["hpfFreq"] = 120.0;
+        const Preset vq = Normalized (vp);
+        CHECK (vq.values.size() == (size_t) kNumKnobs);
+        Preset vr;
+        CHECK (ParsePreset (SerializePreset (vq), vr));
+        vr = Normalized (vr);
+        CHECK (vr.values.at ("hpfFreq") == 120.0);
+        CHECK (vr.values.at ("gateThresh") == -50.0); // default
+        Preset wild = def;
+        wild.values["hpfFreq"] = 99999.0;             // out of range
+        wild.values["bogusKnob"] = 1.0;               // unknown
+        const Preset wf = Normalized (wild);
+        CHECK (wf.values.at ("hpfFreq") == 200.0);    // clamped
+        CHECK (wf.values.count ("bogusKnob") == 0);   // dropped
+    }
+
     // Broken input gets repaired, not rejected.
     Preset broken;
     CHECK (ParsePreset ("{\"name\": \"x\", \"on\": {\"gate\": false, \"bogus\": true},"

@@ -185,6 +185,15 @@ void ApplyPresetLive()
         g_engine.SetParameter ((unsigned int) f.paramId,
                                it != g_currentPreset.on.end() && it->second ? 1.0 : 0.0);
     }
+    for (int i = 0; i < kNumKnobs; ++i)
+    {
+        const KnobDef& k = kKnobs[i];
+        const auto it = g_currentPreset.values.find (k.valueKey);
+        const float plain = it != g_currentPreset.values.end() ? (float) it->second
+                            : MicFilterParams::rangeFor (k.paramId).def;
+        g_engine.SetParameter ((unsigned int) k.paramId,
+                               MicFilterParams::toNormalized (k.paramId, plain));
+    }
     g_engine.SetStageOrder (StageOrderIds (g_currentPreset));
     miclog::Write ("preset: applied '%s' live", WideToUtf8 (g_currentPreset.name).c_str());
 }
@@ -224,6 +233,15 @@ bool StartEngine (HWND hwnd)
         const auto it = g_currentPreset.on.find (f.key);
         cfg.initialParams.push_back ({ (unsigned int) f.paramId,
                                        it != g_currentPreset.on.end() && it->second ? 1.0 : 0.0 });
+    }
+    for (int i = 0; i < kNumKnobs; ++i)
+    {
+        const KnobDef& k = kKnobs[i];
+        const auto it = g_currentPreset.values.find (k.valueKey);
+        const float plain = it != g_currentPreset.values.end() ? (float) it->second
+                            : MicFilterParams::rangeFor (k.paramId).def;
+        cfg.initialParams.push_back ({ (unsigned int) k.paramId,
+                                       (double) MicFilterParams::toNormalized (k.paramId, plain) });
     }
     cfg.initialStageOrder = StageOrderIds (g_currentPreset);
     std::wstring err;
