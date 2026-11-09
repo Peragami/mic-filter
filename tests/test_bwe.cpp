@@ -17,7 +17,7 @@ void check (bool ok, const char* name, double value)
 }
 double bandRms (const float* b, int n, double sr, float lo, float hi)
 {
-    pure2::BweBiquad bq;
+    pure::Biquad bq;
     const float fc = std::sqrt (lo * hi);
     bq.setBandPass (sr, fc, fc / (hi - lo));
     double s = 0;
@@ -50,7 +50,7 @@ int main()
     }
     // Cheap-mic degradation: cascade of lowpasses (steep rolloff above ~5k).
     {
-        pure2::BweBiquad lp1, lp2, lp3, lp4;
+        pure::Biquad lp1, lp2, lp3, lp4;
         lp1.setLowPass (SR, 5800); lp2.setLowPass (SR, 5800);
         lp3.setLowPass (SR, 6400); lp4.setLowPass (SR, 6400);
         for (int i = 0; i < N; ++i) degr[i] = lp4.process (lp3.process (lp2.process (lp1.process (full[i]))));

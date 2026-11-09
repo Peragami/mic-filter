@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(MicFilterClient VERSION 0.7.0 LANGUAGES C CXX)
+project(MicFilterClient VERSION 0.8.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,6 +13,11 @@ add_executable(MicFilterClient WIN32
     src/log.cpp
     src/log.h
     src/main.cpp
+    src/mic_level.cpp
+    src/mic_level.h
+    src/calibration.cpp
+    src/calibration.h
+    src/ui_shared.h
     src/wasapi_engine.cpp
     src/wasapi_engine.h
 )

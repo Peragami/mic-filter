@@ -20,6 +20,24 @@ struct Biquad
         x2=x1; x1=x; y2=y1; y1=y; return y;
     }
     void reset(){ x1=x2=y1=y2=0; }
+    void setLowPass (double sr, float freq, float q=0.7071f)
+    {
+        double w=2*3.141592653589793*freq/sr, cw=std::cos(w), sw=std::sin(w), al=sw/(2*q);
+        double a0=1+al; b0=float(((1-cw)/2)/a0); b1=float((1-cw)/a0); b2=b0;
+        a1=float((-2*cw)/a0); a2=float((1-al)/a0);
+    }
+    void setBandPass (double sr, float freq, float q) // constant 0 dB peak gain
+    {
+        double w=2*3.141592653589793*freq/sr, cw=std::cos(w), sw=std::sin(w), al=sw/(2*q);
+        double a0=1+al; b0=float(al/a0); b1=0; b2=float(-al/a0);
+        a1=float((-2*cw)/a0); a2=float((1-al)/a0);
+    }
+    void setNotch (double sr, float freq, float q)
+    {
+        double w=2*3.141592653589793*freq/sr, cw=std::cos(w), sw=std::sin(w), al=sw/(2*q);
+        double a0=1+al; b0=float(1/a0); b1=float((-2*cw)/a0); b2=b0;
+        a1=b1; a2=float((1-al)/a0);
+    }
     void setHighPass (double sr, float freq, float q=0.7071f)
     {
         double w=2*3.141592653589793*freq/sr, cw=std::cos(w), sw=std::sin(w), al=sw/(2*q);

@@ -20,39 +20,6 @@
 
 namespace pure2 {
 
-// Local RBJ biquad (PureDsp's lacks LP/BP setters; coefficients identical
-// to the ones the trainer used).
-struct BweBiquad
-{
-    float b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, x1 = 0, x2 = 0, y1 = 0, y2 = 0;
-    inline float process (float x)
-    {
-        float y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
-        x2 = x1; x1 = x; y2 = y1; y1 = y; return y;
-    }
-    void reset() { x1 = x2 = y1 = y2 = 0; }
-    void setCoeffs (double bb0, double bb1, double bb2, double aa0, double aa1, double aa2)
-    {
-        b0 = (float) (bb0 / aa0); b1 = (float) (bb1 / aa0); b2 = (float) (bb2 / aa0);
-        a1 = (float) (aa1 / aa0); a2 = (float) (aa2 / aa0);
-    }
-    void setBandPass (double sr, float freq, float q)
-    {
-        double w = 2 * 3.141592653589793 * freq / sr, cw = std::cos (w), sw = std::sin (w), al = sw / (2 * q);
-        setCoeffs (al, 0, -al, 1 + al, -2 * cw, 1 - al);
-    }
-    void setHighPass (double sr, float freq, float q = 0.7071f)
-    {
-        double w = 2 * 3.141592653589793 * freq / sr, cw = std::cos (w), sw = std::sin (w), al = sw / (2 * q);
-        setCoeffs ((1 + cw) / 2, -(1 + cw), (1 + cw) / 2, 1 + al, -2 * cw, 1 - al);
-    }
-    void setLowPass (double sr, float freq, float q = 0.7071f)
-    {
-        double w = 2 * 3.141592653589793 * freq / sr, cw = std::cos (w), sw = std::sin (w), al = sw / (2 * q);
-        setCoeffs ((1 - cw) / 2, 1 - cw, (1 - cw) / 2, 1 + al, -2 * cw, 1 - al);
-    }
-};
-
 struct BweParams
 {
     bool on = false;
@@ -68,9 +35,9 @@ struct BweStage
     double sr = 48000;
 
     // Continuous analysis filters (same coefficients as the trainer).
-    BweBiquad srcBand[6];
-    BweBiquad excHP, excLP;
-    BweBiquad excBand[3];
+    pure::Biquad srcBand[6];
+    pure::Biquad excHP, excLP;
+    pure::Biquad excBand[3];
     static constexpr float kSrcBands[6][2] = {{300, 800}, {800, 1500}, {1500, 2500}, {2500, 3500}, {3500, 5000}, {5000, 6500}};
     static constexpr float kTgtBands[3][2] = {{7000, 9500}, {9500, 12000}, {12000, 16000}};
 
@@ -103,7 +70,7 @@ struct BweStage
         p = np;
         if (p.on && !was) reset();
     }
-    void setBand (BweBiquad& bq, float lo, float hi) const
+    void setBand (pure::Biquad& bq, float lo, float hi) const
     {
         const float fc = std::sqrt (lo * hi);
         bq.setBandPass (sr, fc, fc / (hi - lo));

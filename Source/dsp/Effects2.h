@@ -26,37 +26,6 @@ using pure::dbToGain;
 using pure::clampf;
 static constexpr double kPi = 3.141592653589793;
 
-// Biquad with the coefficient sets PureDsp's Biquad lacks (LP / HP / notch).
-// Same DF1 structure and state layout style as pure::Biquad.
-struct FXBiquad
-{
-    float b0=1, b1=0, b2=0, a1=0, a2=0, x1=0, x2=0, y1=0, y2=0;
-    inline float process (float x)
-    {
-        float y = b0*x + b1*x1 + b2*x2 - a1*y1 - a2*y2;
-        x2=x1; x1=x; y2=y1; y1=y; return y;
-    }
-    void reset(){ x1=x2=y1=y2=0; }
-    void setLowPass (double sr, float freq, float q=0.7071f)
-    {
-        double w=2*kPi*freq/sr, cw=std::cos(w), sw=std::sin(w), al=sw/(2*q);
-        double a0=1+al; b0=float(((1-cw)/2)/a0); b1=float((1-cw)/a0); b2=b0;
-        a1=float((-2*cw)/a0); a2=float((1-al)/a0);
-    }
-    void setHighPass (double sr, float freq, float q=0.7071f)
-    {
-        double w=2*kPi*freq/sr, cw=std::cos(w), sw=std::sin(w), al=sw/(2*q);
-        double a0=1+al; b0=float(((1+cw)/2)/a0); b1=float((-(1+cw))/a0); b2=b0;
-        a1=float((-2*cw)/a0); a2=float((1-al)/a0);
-    }
-    void setNotch (double sr, float freq, float q)
-    {
-        double w=2*kPi*freq/sr, cw=std::cos(w), sw=std::sin(w), al=sw/(2*q);
-        double a0=1+al; b0=float(1/a0); b1=float((-2*cw)/a0); b2=b0;
-        a1=b1; a2=float((1-al)/a0);
-    }
-};
-
 // Cubic Hermite segment between endpoint (y0, slope m0) and (y1, slope m1),
 // h samples apart. Returns the value t in (0,1) along the segment.
 // Shared by DeClipper and DeClicker repairs: with the slopes taken from the
@@ -215,7 +184,7 @@ struct MultibandParams
 struct MultibandExpander
 {
     static constexpr float kCross[3] = { 250.0f, 1000.0f, 4000.0f };
-    FXBiquad lp[3];
+    pure::Biquad lp[3];
     MultibandParams p;
     float env[4] = {}, gain[4] = {1,1,1,1};
     float atkCoef=0.5f, relCoef=0.005f, envDecay=0.999f;
@@ -277,7 +246,7 @@ struct DeEsserParams
 };
 struct DeEsser
 {
-    FXBiquad lpSplit, hpSide;
+    pure::Biquad lpSplit, hpSide;
     DeEsserParams p;
     float env=0, gain=1, envDecay=0.999f, atkCoef=0.5f, relCoef=0.01f;
     void prepare (double sr, const DeEsserParams& np)
@@ -416,7 +385,7 @@ struct ExciterParams
 };
 struct Exciter
 {
-    FXBiquad lpSplit;
+    pure::Biquad lpSplit;
     ExciterParams p;
     float prevHigh = 0;
     void prepare (double sr, const ExciterParams& np) { p = np; lpSplit.setLowPass (sr, p.freq); reset(); }
@@ -454,7 +423,7 @@ struct TransientDuckParams
 struct TransientDuck
 {
     static constexpr int kLookahead = 64;
-    FXBiquad hp;
+    pure::Biquad hp;
     TransientDuckParams p;
     float ring[kLookahead] = {};
     int ringPos = 0;

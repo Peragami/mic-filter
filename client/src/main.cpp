@@ -1,6 +1,8 @@
 // MicFilter dedicated client -- tiny Win32 GUI around WasapiEngine.
-// No framework: plain Win32 controls, WASAPI does the audio, the .vst3
-// does the filtering. See README.md for usage.
+// No framework: plain Win32 controls, WASAPI does the audio, the DSP
+// chain is embedded in the engine (v0.7+). Mic level lives in
+// mic_level.cpp, auto calibration in calibration.cpp, shared UI bits in
+// ui_shared.h. See README.md for usage.
 
 #include <windows.h>
 #include <commctrl.h>
@@ -15,25 +17,12 @@
 #include <string>
 #include <vector>
 
+#include "calibration.h"
 #include "log.h"
+#include "mic_level.h"
+#include "ui_shared.h"
 #include "vst3/source/paramids.h" // MicFilterParams::ParamID (shared with the plugin)
 #include "wasapi_engine.h"
-
-namespace {
-
-constexpr int IDC_INPUT_COMBO = 1001;
-constexpr int IDC_OUTPUT_COMBO = 1002;
-constexpr int IDC_BUFFER_COMBO = 1003;
-constexpr int IDC_PLUGIN_EDIT = 1004;
-constexpr int IDC_BROWSE_BUTTON = 1005;
-constexpr int IDC_START_BUTTON = 1006;
-constexpr int IDC_METER = 1007;
-constexpr int IDC_STATUS = 1008;
-constexpr int IDC_MIC_LEVEL = 1009;
-constexpr int IDC_MIC_LEVEL_VALUE = 1010;
-constexpr int IDC_CALIB_BUTTON = 1011;
-constexpr int IDC_DRY_CHECK = 1012;
-constexpr int IDC_FILTER_BASE = 1020; // + index into kFilterDefs (11 entries)
 
 // Per-filter on/off switches. Param ids come from the plugin's paramids.h;
 // all of these default to ON in the plugin, so the boxes start checked.
@@ -57,8 +46,6 @@ constexpr FilterDef kFilterDefs[] = {
     { MicFilterParams::kLimiterOn,   L"リミッター（天井）", true },
 };
 constexpr int kNumFilters = (int) (sizeof (kFilterDefs) / sizeof (kFilterDefs[0]));
-constexpr UINT_PTR kTimerId = 1;
-constexpr UINT WM_DEVICECHANGE_MSG = WM_APP + 1; // posted by DeviceNotificationClient
 
 WasapiEngine g_engine;
 std::vector<AudioDeviceInfo> g_captureDevices;
@@ -66,25 +53,9 @@ std::vector<AudioDeviceInfo> g_renderDevices;
 float g_meterDisplay = 0.0f;
 bool g_running = false;
 
-// Auto level calibration state (docs/gain-staging.md "step 1 automation"):
-// while active the engine is bypassed (dry) and we measure the raw peak for
-// kCalibTicks, then nudge the Windows endpoint level (in dB) toward a target
-// peak of -9 dB, up to kCalibRounds times.
-bool g_calibrating = false;
-int g_calibTicksLeft = 0;
-int g_calibRound = 0;
-constexpr int kCalibTicks = 60;   // 60 * 50 ms = 3 s per round
-constexpr int kCalibRounds = 3;
-constexpr float kCalibTargetDb = -9.0f; // centre of the -12..-6 window
-
-void UpdateStatus (HWND hwnd, const std::wstring& prefix = L""); // defined below
-
-// Device hot-plug tracking (IMMNotificationClient) + the capture device's
-// Windows level (IAudioEndpointVolume), cached for the selected device.
+// Device hot-plug tracking (IMMNotificationClient).
 IMMDeviceEnumerator* g_deviceEnumerator = nullptr;
 IMMNotificationClient* g_notificationClient = nullptr;
-IAudioEndpointVolume* g_micVolume = nullptr;
-std::wstring g_micVolumeDeviceId;
 
 // Posts WM_DEVICECHANGE_MSG to the window whenever an audio endpoint is
 // added / removed / changes state / the default changes. Callbacks arrive
@@ -123,218 +94,6 @@ private:
     HWND hwnd_;
 };
 
-HWND Ctl (HWND parent, int id) { return GetDlgItem (parent, id); }
-
-void AddLabel (HWND parent, const wchar_t* text, int x, int y, int w)
-{
-    CreateWindowW (L"STATIC", text, WS_CHILD | WS_VISIBLE, x, y, w, 20,
-                   parent, nullptr, nullptr, nullptr);
-}
-
-HWND AddCombo (HWND parent, int id, int x, int y, int w)
-{
-    HWND h = CreateWindowW (L"COMBOBOX", L"",
-                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
-                            x, y, w, 200, parent, reinterpret_cast<HMENU> ((INT_PTR) id),
-                            nullptr, nullptr);
-    return h;
-}
-
-void FillDeviceCombo (HWND combo, const std::vector<AudioDeviceInfo>& devices,
-                      const std::wstring& preferredId = L"")
-{
-    int select = 0;
-    for (size_t i = 0; i < devices.size(); ++i)
-    {
-        const int idx = (int) SendMessageW (combo, CB_ADDSTRING, 0,
-                                            reinterpret_cast<LPARAM> (devices[i].name.c_str()));
-        SendMessageW (combo, CB_SETITEMDATA, idx, (LPARAM) i);
-        if (!preferredId.empty() && devices[i].id == preferredId) select = idx;
-        else if (preferredId.empty() &&
-                 devices[i].name.find (L"（既定）") != std::wstring::npos) select = idx;
-    }
-    if (!devices.empty()) SendMessageW (combo, CB_SETCURSEL, select, 0);
-}
-
-std::wstring SelectedDeviceId (HWND combo, const std::vector<AudioDeviceInfo>& devices)
-{
-    const LRESULT sel = SendMessageW (combo, CB_GETCURSEL, 0, 0);
-    if (sel == CB_ERR) return L"";
-    const LRESULT data = SendMessageW (combo, CB_GETITEMDATA, sel, 0);
-    if (data == CB_ERR || (size_t) data >= devices.size()) return L"";
-    return devices[(size_t) data].id;
-}
-
-// --- Windows mic level (IAudioEndpointVolume on the capture device) -------
-
-void ReleaseMicVolume()
-{
-    if (g_micVolume) { g_micVolume->Release(); g_micVolume = nullptr; }
-    g_micVolumeDeviceId.clear();
-}
-
-bool EnsureMicVolume (const std::wstring& deviceId)
-{
-    if (g_micVolume && g_micVolumeDeviceId == deviceId) return true;
-    ReleaseMicVolume();
-    IMMDeviceEnumerator* en = nullptr;
-    if (FAILED (CoCreateInstance (__uuidof (MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-                                  __uuidof (IMMDeviceEnumerator),
-                                  reinterpret_cast<void**> (&en))) || !en)
-        return false;
-    IMMDevice* dev = nullptr;
-    const HRESULT hr = deviceId.empty()
-        ? en->GetDefaultAudioEndpoint (eCapture, eConsole, &dev)
-        : en->GetDevice (deviceId.c_str(), &dev);
-    en->Release();
-    if (FAILED (hr) || !dev) return false;
-    const HRESULT act = dev->Activate (__uuidof (IAudioEndpointVolume), CLSCTX_ALL, nullptr,
-                                       reinterpret_cast<void**> (&g_micVolume));
-    dev->Release();
-    if (FAILED (act) || !g_micVolume) return false;
-    g_micVolumeDeviceId = deviceId;
-    return true;
-}
-
-void SetMicLevelLabel (HWND hwnd, int pos)
-{
-    wchar_t buf[16];
-    swprintf_s (buf, L"%d", pos);
-    SetWindowTextW (Ctl (hwnd, IDC_MIC_LEVEL_VALUE), buf);
-}
-
-// Slider moved by the user: write straight through to the device.
-void ApplyMicLevel (HWND hwnd)
-{
-    const int pos = (int) SendMessageW (Ctl (hwnd, IDC_MIC_LEVEL), TBM_GETPOS, 0, 0);
-    SetMicLevelLabel (hwnd, pos);
-    const std::wstring id = SelectedDeviceId (Ctl (hwnd, IDC_INPUT_COMBO), g_captureDevices);
-    if (EnsureMicVolume (id))
-    {
-        const HRESULT hr = g_micVolume->SetMasterVolumeLevelScalar (pos / 100.0f, nullptr);
-        miclog::Write ("app: mic level slider -> %d (hr=0x%08lX)", pos, (unsigned long) hr);
-    }
-}
-
-// Capture device (re)selected by the user: show its actual current level.
-void RefreshMicLevelFromDevice (HWND hwnd)
-{
-    const std::wstring id = SelectedDeviceId (Ctl (hwnd, IDC_INPUT_COMBO), g_captureDevices);
-    ReleaseMicVolume();
-    float v = 0.0f;
-    if (EnsureMicVolume (id) &&
-        SUCCEEDED (g_micVolume->GetMasterVolumeLevelScalar (&v)))
-    {
-        const int pos = (int) (v * 100.0f + 0.5f);
-        SendMessageW (Ctl (hwnd, IDC_MIC_LEVEL), TBM_SETPOS, TRUE, pos);
-        SetMicLevelLabel (hwnd, pos);
-    }
-}
-
-// --- Auto level calibration ----------------------------------------------
-// Adjusts the Windows endpoint level **in dB** (IAudioEndpointVolume's dB
-// API, so the taper curve does not distort the math). Windows level first:
-// it decides clipping / hiss before the app ever sees the signal. Any gain
-// still missing at the top of the range is reported, not silently faked.
-
-bool IsChecked (HWND hwnd, int idc)
-{
-    return SendMessageW (Ctl (hwnd, idc), BM_GETCHECK, 0, 0) == BST_CHECKED;
-}
-
-void CalibFinish (HWND hwnd, const std::wstring& result)
-{
-    miclog::WriteW (L"calib: finish: %s", result.c_str());
-    g_calibrating = false;
-    g_engine.SetBypass (IsChecked (hwnd, IDC_DRY_CHECK)); // restore the dry toggle's state
-    SetWindowTextW (Ctl (hwnd, IDC_CALIB_BUTTON), L"自動較正");
-    RefreshMicLevelFromDevice (hwnd); // slider shows the level we ended at
-    UpdateStatus (hwnd, result);
-}
-
-void CalibStart (HWND hwnd)
-{
-    if (!g_running)
-    {
-        MessageBoxW (hwnd, L"先に「開始」でマイクを通してから較正してください",
-                     L"MicFilter", MB_OK | MB_ICONINFORMATION);
-        return;
-    }
-    const std::wstring id = SelectedDeviceId (Ctl (hwnd, IDC_INPUT_COMBO), g_captureDevices);
-    if (!EnsureMicVolume (id))
-    {
-        MessageBoxW (hwnd, L"このマイクの音量をアプリから変更できませんでした",
-                     L"MicFilter", MB_OK | MB_ICONWARNING);
-        return;
-    }
-    miclog::Write ("calib: start (target peak %.1f dB, window %d..%d, rounds<=%d)",
-                   kCalibTargetDb, -12, -6, kCalibRounds);
-    g_calibrating = true;
-    g_calibRound = 0;
-    g_calibTicksLeft = kCalibTicks;
-    g_engine.SetBypass (true); // all filters off while measuring (user's rule)
-    g_engine.ResetClipCount();
-    (void) g_engine.TakeRawPeak();
-    SetWindowTextW (Ctl (hwnd, IDC_CALIB_BUTTON), L"較正中止");
-    UpdateStatus (hwnd, L"較正中：フィルター全OFF。一番大きな声で喋ってください…");
-}
-
-void CalibCancel (HWND hwnd) { CalibFinish (hwnd, L"較正を中止しました"); }
-
-// One measurement window finished: decide and (maybe) adjust, in dB.
-void CalibEvaluate (HWND hwnd)
-{
-    const float peak = g_engine.TakeRawPeak();
-    const unsigned long long clips = g_engine.ClipCount();
-    g_engine.ResetClipCount();
-    const float peakDb = 20.0f * std::log10 (std::max (peak, 1e-6f));
-    ++g_calibRound;
-    miclog::Write ("calib: round %d measured peak=%.4f (%.1f dB) clips=%llu",
-                   g_calibRound, peak, peakDb, clips);
-
-    wchar_t buf[256];
-    if (peak < 0.01f) // ~ -40 dB: basically no voice captured
-    {
-        CalibFinish (hwnd, L"較正：声が小さすぎて測れませんでした。マイクに近づいて、もう一度");
-        return;
-    }
-    float deltaDb = 0.0f;
-    if (clips > 0 || peakDb > -6.0f)
-        deltaDb = (kCalibTargetDb - peakDb) - 1.0f; // clipped or hot: down, +1 dB safety
-    else if (peakDb < -12.0f)
-        deltaDb = kCalibTargetDb - peakDb;          // too quiet: up
-    else
-    {
-        swprintf_s (buf, L"較正完了：ピーク %.1f dB（目標 -12〜-6）", peakDb);
-        CalibFinish (hwnd, buf);
-        return;
-    }
-    if (g_calibRound >= kCalibRounds)
-    {
-        swprintf_s (buf, L"較正：%d回調整しても範囲に入らず（ピーク %.1f dB）。Windowsレベルの上限/下限に達した可能性",
-                    kCalibRounds, peakDb);
-        CalibFinish (hwnd, buf);
-        return;
-    }
-    const std::wstring id = SelectedDeviceId (Ctl (hwnd, IDC_INPUT_COMBO), g_captureDevices);
-    if (EnsureMicVolume (id))
-    {
-        float curDb = 0.0f, minDb = 0.0f, maxDb = 0.0f, stepDb = 0.0f;
-        if (SUCCEEDED (g_micVolume->GetMasterVolumeLevel (&curDb)) &&
-            SUCCEEDED (g_micVolume->GetVolumeRange (&minDb, &maxDb, &stepDb)))
-        {
-            const float next = std::min (maxDb, std::max (minDb, curDb + deltaDb));
-            const HRESULT hr = g_micVolume->SetMasterVolumeLevel (next, nullptr);
-            miclog::Write ("calib: endpoint level %.1f dB -> %.1f dB (range %.1f..%.1f, delta %.1f, hr=0x%08lX)",
-                           curDb, next, minDb, maxDb, deltaDb, (unsigned long) hr);
-        }
-        else
-            miclog::Write ("calib: could not read endpoint level/range");
-    }
-    g_calibTicksLeft = kCalibTicks;
-    UpdateStatus (hwnd, L"較正中：レベルを調整しました。もう一度、一番大きな声で…");
-}
-
 // Rebuild both combos after a hot-plug notification, keeping the current
 // selection by device id where the device still exists.
 void LogDeviceList()
@@ -358,9 +117,7 @@ void ReenumerateDevices (HWND hwnd)
     SendMessageW (Ctl (hwnd, IDC_OUTPUT_COMBO), CB_RESETCONTENT, 0, 0);
     FillDeviceCombo (Ctl (hwnd, IDC_INPUT_COMBO), g_captureDevices, capId);
     FillDeviceCombo (Ctl (hwnd, IDC_OUTPUT_COMBO), g_renderDevices, renId);
-    if (g_micVolume && g_micVolumeDeviceId !=
-                           SelectedDeviceId (Ctl (hwnd, IDC_INPUT_COMBO), g_captureDevices))
-        ReleaseMicVolume();
+    ReleaseMicVolumeIfNotCurrent (SelectedDeviceId (Ctl (hwnd, IDC_INPUT_COMBO), g_captureDevices));
 }
 
 int SelectedBlockFrames (HWND hwnd)
@@ -442,11 +199,7 @@ bool DoStart (HWND hwnd)
 
 void DoStop (HWND hwnd)
 {
-    if (g_calibrating) // engine stops: calibration cannot continue
-    {
-        g_calibrating = false;
-        SetWindowTextW (Ctl (hwnd, IDC_CALIB_BUTTON), L"自動較正");
-    }
+    CalibrationOnEngineStopped (hwnd);
     miclog::Write ("app: stopping (xruns=%llu)", g_engine.XrunCount());
     g_engine.Stop();
     g_running = false;
@@ -574,14 +327,14 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             if (LOWORD (wp) == IDC_CALIB_BUTTON)
             {
-                if (g_calibrating) CalibCancel (hwnd);
+                if (CalibrationActive()) CalibCancel (hwnd);
                 else CalibStart (hwnd);
                 return 0;
             }
             if (LOWORD (wp) == IDC_DRY_CHECK)
             {
                 const bool dry = IsChecked (hwnd, IDC_DRY_CHECK);
-                if (!g_calibrating) g_engine.SetBypass (dry);
+                if (!CalibrationActive()) g_engine.SetBypass (dry);
                 miclog::Write ("app: dry(bypass) = %d", dry ? 1 : 0);
                 return 0;
             }
@@ -599,8 +352,7 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             {
                 if (g_running)
                 {
-                    if (g_calibrating && --g_calibTicksLeft <= 0)
-                        CalibEvaluate (hwnd);
+                    CalibrationOnTimerTick (hwnd);
                     // Auto buffer step-up requested by the engine (XRUNs).
                     const int requested = g_engine.RequestedBufferFrames();
                     if (requested > 0 && requested != SelectedBlockFrames (hwnd))
@@ -635,8 +387,6 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     return DefWindowProcW (hwnd, msg, wp, lp);
 }
-
-} // namespace
 
 int APIENTRY wWinMain (HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow)
 {
