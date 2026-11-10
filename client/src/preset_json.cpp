@@ -46,7 +46,7 @@ namespace
 {
 const char* kStageKeysInDefaultOrder[] = {
     "declip", "declick", "duck", "hpf", "hum", "rnnoise", "spectral",
-    "eq", "autoeq", "multiband", "gate", "deesser", "comp", "exciter", "bwe", "limiter"
+    "autoeq", "eq", "multiband", "gate", "deesser", "comp", "exciter", "bwe", "limiter"
 };
 
 std::string JsonEscape (const std::string& s)

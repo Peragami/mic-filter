@@ -1,6 +1,6 @@
 {
-  "version": "0.21.0",
-  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.21.0.zip",
-  "sha256": "fd92a23ab909af979a298a8513d9bde66534a9f804f30dae6c448cc1fac201b7",
-  "notes": "自動EQ（マイク補正）を追加：声のバランスを測ってマイクの癖を自動補正（既定ON・遅延なし）"
+  "version": "0.21.1",
+  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.21.1.zip",
+  "sha256": "fcfd3d55dbdc47f3ef6a2d6b46769daef4b587d55bea05b5d14b527fa186213a",
+  "notes": "自動EQの標準位置をEQの手前に変更（先にマイクの癖を補正→手動EQはそのまま味付けとして残る）"
 }
