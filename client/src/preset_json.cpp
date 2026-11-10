@@ -44,10 +44,9 @@ std::wstring Utf8ToWideLocal (const std::string& s)
 
 namespace
 {
-const char* kStageKeysInDefaultOrder[] = {
-    "declip", "declick", "duck", "hpf", "hum", "rnnoise", "spectral",
-    "autoeq", "eq", "multiband", "gate", "deesser", "comp", "exciter", "bwe", "limiter"
-};
+// Shared with the settings list (preset.h): groups concatenated.
+const char* const* kStageKeysInDefaultOrder = kCanonicalStageKeys;
+constexpr int kNumStageKeysInDefaultOrder = kNumCanonicalStageKeys;
 
 std::string JsonEscape (const std::string& s)
 {
@@ -202,7 +201,7 @@ Preset DefaultPreset()
     p.name = L"標準";
     for (int i = 0; i < kNumFilterInfos; ++i)
         p.on[kFilterRegistry[i].key] = kFilterRegistry[i].defOn;
-    p.order.assign (std::begin (kStageKeysInDefaultOrder), std::end (kStageKeysInDefaultOrder));
+    p.order.assign (kStageKeysInDefaultOrder, kStageKeysInDefaultOrder + kNumStageKeysInDefaultOrder);
     return p;
 }
 
@@ -271,8 +270,9 @@ Preset Normalized (Preset p)
         const FilterInfo* f = FindFilter (key);
         if (f && f->stage >= 0 && seen.insert (key).second) order.push_back (key);
     }
-    for (const char* key : kStageKeysInDefaultOrder)
-        if (seen.insert (key).second) order.push_back (key);
+    for (int i = 0; i < kNumStageKeysInDefaultOrder; ++i)
+        if (seen.insert (kStageKeysInDefaultOrder[i]).second)
+            order.push_back (kStageKeysInDefaultOrder[i]);
     p.order = order;
 
     // blocks: members are rebuilt in chain order, deduped across

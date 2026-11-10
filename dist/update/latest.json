@@ -1,6 +1,6 @@
 {
-  "version": "0.23.0",
-  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.23.0.zip",
-  "sha256": "bcc717cc5c7760cbf86013d3337dc86867948461974ad1e9c486b1d6b27d8e23",
-  "notes": "設定画面に「ソロ試聴」（1フィルターだけ聞ける）と「ノイズ除去系の一括ON/OFF」を追加"
+  "version": "0.24.0",
+  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.24.0.zip",
+  "sha256": "229a2be7b84e701998e1445feb52ea0c8ecc832ef2fa87bace4a0e1e8a777e42",
+  "notes": "設定画面をグループ式リストに作り替え（グループ/各フィルターのON・OFF、ダブルクリックで個別設定、ソロ試聴）。並び順はグループ順に固定"
 }

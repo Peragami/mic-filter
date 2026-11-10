@@ -76,7 +76,7 @@ int main()
     // Blocks round-trip; non-consecutive blocks are dissolved.
     {
         Preset bp = def;
-        bp.blocks = { { L"前半", { "declip", "declick", "duck" }, true } };
+        bp.blocks = { { L"前半", { "declip", "hpf", "hum" }, true } };
         Preset bq;
         CHECK (ParsePreset (SerializePreset (Normalized (bp)), bq));
         bq = Normalized (bq);

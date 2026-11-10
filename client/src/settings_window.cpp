@@ -1,9 +1,9 @@
 // settings_window.cpp -- see settings_window.h.
-// v0.20: DAW-style board. Module cards sit in signal-flow order
-// (left to right, wrapping); each card has a power LED, rotary knobs
-// (drag / wheel / double-click to reset), and can be dragged to
-// reorder. Consecutive cards can be bundled into order blocks, drawn
-// as backplates. Everything autosaves.
+// v0.24: grouped list (the user's wireframe). Groups stack vertically,
+// filter rows inside follow the fixed canonical processing order.
+// Group and row on/off switches, per-row solo audition, and a
+// double-click opens the per-filter settings dialog. Everything
+// autosaves. (The v0.20 DAW board and its drag/blocks are gone.)
 // GDI+ needs the full Windows headers (PROPID & friends), so drop
 // WIN32_LEAN_AND_MEAN for this file only.
 #undef WIN32_LEAN_AND_MEAN
@@ -205,239 +205,45 @@ bool PromptText (HWND parent, const wchar_t* title, const std::wstring& initial,
 namespace
 {
 // =====================================================================
-// DAW-style board: module cards in signal-flow order (left to right,
-// wrapping), rotary knobs, power LEDs, drag to reorder, blocks drawn
-// as backplates. Everything is custom-drawn in one child window.
+// Grouped list (v0.24, the user's wireframe): groups stacked
+// vertically, filter rows inside in processing order (top = first).
+// Group headers and every row carry an on/off switch; a row's "solo"
+// pill auditions that filter alone; double-clicking a row opens the
+// per-filter settings dialog. No drag reorder, no blocks: the order
+// is the fixed canonical group order.
 // =====================================================================
-constexpr int kCardH = 140;
-constexpr int kKnobR = 16;
-constexpr int kChipW = 176;
-constexpr int kChipH = 54;
+constexpr int kRowH = 46;
+constexpr int kHeadH = 32;
 
-struct KnobGeom
-{
-    const KnobDef* def = nullptr;
-    POINT center { 0, 0 };
-};
-struct CardGeom
+struct RowGeom
 {
     std::string key;
+    int groupIdx = -1;
     RECT rc {};
-    int orderPos = 0;
-    std::vector<KnobGeom> knobs;
-    RECT breathRc {};
-    bool hasBreath = false;
+    RECT powerRc {};
     RECT soloRc {};
 };
-struct ChipGeom
+struct GroupGeom
 {
-    int blockIdx = -1;
+    int groupIdx = -1;
     RECT rc {};
-    RECT unfoldRc {};
+    RECT toggleRc {};
 };
-struct PlateGeom
-{
-    int blockIdx = -1;
-    RECT rc {};       // backplate segment around member cards of one row
-    RECT tabRc {};    // top band (drag / double-click to rename)
-    RECT foldRc {};   // first segment only
-    RECT dissolveRc {}; // first segment only
-    bool first = false;
-};
-std::vector<CardGeom> g_cards;
-std::vector<ChipGeom> g_chips;
-std::vector<PlateGeom> g_plates;
+std::vector<RowGeom> g_rows;
+std::vector<GroupGeom> g_groupGeoms;
 int g_contentH = 0;
 
-int BlockOf (const std::string& key)
+const FilterInfo* FindFilterInfo (const std::string& key)
 {
-    for (size_t b = 0; b < g_edit.blocks.size(); ++b)
-        for (const auto& k : g_edit.blocks[b].filters)
-            if (k == key) return (int) b;
-    return -1;
+    for (int i = 0; i < kNumFilterInfos; ++i)
+        if (key == kFilterRegistry[i].key) return &kFilterRegistry[i];
+    return nullptr;
 }
 
-int KnobCountOf (const std::string& key)
+bool FilterOn (const std::string& key)
 {
-    int n = 0;
-    for (int i = 0; i < kNumKnobs; ++i)
-        if (kKnobs[i].filterKey == key) ++n;
-    return n;
-}
-
-int CardWidthOf (const std::string& key)
-{
-    return std::max (110, 26 + KnobCountOf (key) * 48);
-}
-
-struct FlowUnit
-{
-    bool chip = false;
-    int blockIdx = -1;
-    std::string key;
-    int width = 0;
-};
-
-void LayoutBoard()
-{
-    g_cards.clear();
-    g_chips.clear();
-    g_plates.clear();
-    RECT client {};
-    GetClientRect (g_board, &client);
-    const int panelW = (int) (client.right - client.left);
-
-    // Reading-order units: cards, with collapsed blocks as one chip.
-    std::vector<FlowUnit> units;
-    std::set<int> emitted;
-    std::map<std::string, int> orderPos;
-    for (size_t i = 0; i < g_edit.order.size(); ++i) orderPos[g_edit.order[i]] = (int) i;
-    for (const auto& key : g_edit.order)
-    {
-        const int b = BlockOf (key);
-        if (b >= 0)
-        {
-            if (!emitted.count (b))
-            {
-                emitted.insert (b);
-                if (g_edit.blocks[(size_t) b].collapsed)
-                {
-                    FlowUnit u;
-                    u.chip = true;
-                    u.blockIdx = b;
-                    u.width = kChipW;
-                    units.push_back (u);
-                }
-            }
-            if (g_edit.blocks[(size_t) b].collapsed) continue;
-        }
-        FlowUnit u;
-        u.key = key;
-        u.width = CardWidthOf (key);
-        units.push_back (u);
-    }
-
-    // Wrap into rows.
-    struct Row { std::vector<FlowUnit> units; bool hasPlate = false; };
-    std::vector<Row> rows;
-    {
-        Row cur;
-        int x = 14;
-        for (const auto& u : units)
-        {
-            if (x + u.width > panelW - 14 && !cur.units.empty())
-            {
-                rows.push_back (cur);
-                cur = Row();
-                x = 14;
-            }
-            cur.units.push_back (u);
-            x += u.width + 12;
-        }
-        if (!cur.units.empty()) rows.push_back (cur);
-    }
-    for (auto& row : rows)
-        for (const auto& u : row.units)
-            if (!u.chip && BlockOf (u.key) >= 0) row.hasPlate = true;
-
-    // Assign coordinates; collect plate segments per (block, row).
-    std::map<std::pair<int, int>, PlateGeom> plateSegs;
-    int y = 10;
-    for (size_t r = 0; r < rows.size(); ++r)
-    {
-        const int head = rows[r].hasPlate ? 26 : 8;
-        const int cardTop = y + head;
-        int x = 14;
-        for (const auto& u : rows[r].units)
-        {
-            if (u.chip)
-            {
-                ChipGeom cg;
-                cg.blockIdx = u.blockIdx;
-                cg.rc = { x, cardTop, x + u.width, cardTop + kChipH };
-                cg.unfoldRc = { cg.rc.right - 52, cg.rc.top + 15, cg.rc.right - 10, cg.rc.bottom - 15 };
-                g_chips.push_back (cg);
-            }
-            else
-            {
-                CardGeom cg;
-                cg.key = u.key;
-                cg.orderPos = orderPos[u.key];
-                cg.rc = { x, cardTop, x + u.width, cardTop + kCardH };
-                cg.soloRc = { cg.rc.left + 44, cg.rc.bottom - 21, cg.rc.left + 84, cg.rc.bottom - 5 };
-                int kn = 0;
-                for (int i = 0; i < kNumKnobs; ++i)
-                    if (kKnobs[i].filterKey == u.key) ++kn;
-                int ki = 0;
-                for (int i = 0; i < kNumKnobs; ++i)
-                {
-                    if (kKnobs[i].filterKey != u.key) continue;
-                    KnobGeom kg;
-                    kg.def = &kKnobs[i];
-                    kg.center = { cg.rc.left + (u.width - (kn - 1) * 48) / 2 + ki * 48,
-                                  cg.rc.top + 88 };
-                    cg.knobs.push_back (kg);
-                    ++ki;
-                }
-                if (u.key == "gate")
-                {
-                    cg.hasBreath = true;
-                    cg.breathRc = { cg.rc.right - 86, cg.rc.top + 30, cg.rc.right - 8, cg.rc.top + 49 };
-                }
-                g_cards.push_back (cg);
-                const int b = BlockOf (u.key);
-                if (b >= 0)
-                {
-                    auto& pg = plateSegs[{ b, (int) r }];
-                    if (pg.blockIdx < 0)
-                    {
-                        pg.blockIdx = b;
-                        pg.rc = { cg.rc.left - 7, cg.rc.top - 22, cg.rc.right + 7, cg.rc.bottom + 7 };
-                    }
-                    else
-                    {
-                        pg.rc.left = std::min (pg.rc.left, cg.rc.left - 7);
-                        pg.rc.right = std::max (pg.rc.right, cg.rc.right + 7);
-                        pg.rc.top = std::min (pg.rc.top, cg.rc.top - 22);
-                        pg.rc.bottom = std::max (pg.rc.bottom, cg.rc.bottom + 7);
-                    }
-                }
-            }
-            x += u.width + 12;
-        }
-        y = cardTop + kCardH + 16;
-    }
-    g_contentH = y;
-    std::set<int> firstSeen;
-    for (auto& kv : plateSegs)
-    {
-        PlateGeom pg = kv.second;
-        pg.first = !firstSeen.count (pg.blockIdx);
-        firstSeen.insert (pg.blockIdx);
-        pg.tabRc = { pg.rc.left + 4, pg.rc.top + 1, pg.rc.right - 4, pg.rc.top + 21 };
-        if (pg.first)
-        {
-            // Narrow plates shrink the buttons to glyphs so the name fits.
-            const bool wide = (pg.rc.right - pg.rc.left) >= 240;
-            const int dw = wide ? 46 : 18, fw = wide ? 44 : 16;
-            pg.dissolveRc = { pg.rc.right - 6 - dw, pg.rc.top + 2, pg.rc.right - 6, pg.rc.top + 20 };
-            pg.foldRc = { pg.dissolveRc.left - 4 - fw, pg.rc.top + 2, pg.dissolveRc.left - 4, pg.rc.top + 20 };
-            pg.tabRc.right = pg.foldRc.left - 2;
-        }
-        g_plates.push_back (pg);
-    }
-}
-
-// --- Drawing ---------------------------------------------------------------
-Gdiplus::Color AccentFor (int pos, bool on)
-{
-    static const Gdiplus::Color kPalette[] = {
-        { 255, 96, 142, 205 }, { 255, 118, 178, 118 }, { 255, 205, 150, 92 },
-        { 255, 172, 122, 205 }, { 255, 92, 182, 192 }, { 255, 205, 112, 112 },
-        { 255, 152, 162, 94 }, { 255, 122, 132, 205 },
-    };
-    if (!on) return Gdiplus::Color (255, 110, 114, 120);
-    return kPalette[pos % 8];
+    const auto it = g_edit.on.find (key);
+    return it != g_edit.on.end() && it->second;
 }
 
 void FillRoundRect (Gdiplus::Graphics& g, const RECT& rc, float rad, const Gdiplus::Color& col)
@@ -487,180 +293,136 @@ void DrawText (Gdiplus::Graphics& g, const std::wstring& text, const RECT& rc,
     g.DrawString (text.c_str(), -1, &font, rf, &fmt, &brush);
 }
 
-// Drag state for the board.
-bool g_bDragging = false;
-int g_bDragKind = 0; // 1 = card, 2 = block
-std::string g_bDragKey;
-int g_bDragBlock = -1;
-POINT g_bDragStart { 0, 0 };
-POINT g_bDragNow { 0, 0 };
-bool g_bHasDrop = false;
-std::string g_bDropBefore;
-std::wstring g_bDropInside;
-RECT g_bCaret {};
-const KnobDef* g_knobDragDef = nullptr;
-int g_knobDragStartY = 0;
-double g_knobDragStartVal = 0;
-int g_pendingAction = 0; // 1 = fold, 2 = dissolve, 3 = unfold
-int g_pendingBlock = -1;
-
-std::wstring KnobValueOnly (const KnobDef& def, double v)
+void LayoutList()
 {
-    wchar_t buf[64];
-    switch (def.format)
+    g_rows.clear();
+    g_groupGeoms.clear();
+    RECT client {};
+    GetClientRect (g_board, &client);
+    const int W = (int) (client.right - client.left);
+    const int left = 12, right = W - 12;
+    int y = 10;
+    for (int gi = 0; gi < kNumFilterGroups; ++gi)
     {
-        case 0: swprintf_s (buf, L"%d%s", (int) std::lround (v), def.unit); break;
-        case 1: swprintf_s (buf, L"%.1f%s", v, def.unit); break;
-        case 3: swprintf_s (buf, L"%d%%", (int) std::lround (v * 100.0)); break;
-        case 4: swprintf_s (buf, L"%.1f:1", v); break;
-        default: swprintf_s (buf, L"%.2f%s", v, def.unit); break;
+        GroupGeom gg;
+        gg.groupIdx = gi;
+        gg.rc = { left, y, right, y + kHeadH };
+        gg.toggleRc = { right - 76, y + 4, right - 4, y + kHeadH - 4 };
+        g_groupGeoms.push_back (gg);
+        y += kHeadH + 4;
+        const FilterGroupDef& grp = kFilterGroups[gi];
+        for (int i = 0; i < grp.count; ++i)
+        {
+            RowGeom rg;
+            rg.key = grp.keys[i];
+            rg.groupIdx = gi;
+            rg.rc = { left, y, right, y + kRowH };
+            const int cy = y + kRowH / 2;
+            rg.powerRc = { left + 10, cy - 11, left + 62, cy + 11 };
+            rg.soloRc = { right - 66, cy - 11, right - 10, cy + 11 };
+            g_rows.push_back (rg);
+            y += kRowH + 4;
+        }
+        y += 10;
     }
-    return buf;
+    g_contentH = y;
 }
 
-void DrawBoard (HDC hdc, const RECT& client)
+void GroupState (int gi, bool& allOn, bool& anyOn)
 {
+    allOn = true;
+    anyOn = false;
+    const FilterGroupDef& grp = kFilterGroups[gi];
+    for (int i = 0; i < grp.count; ++i)
+    {
+        if (FilterOn (grp.keys[i])) anyOn = true;
+        else allOn = false;
+    }
+}
+
+std::wstring RowSummary (const std::string& key)
+{
+    std::wstring out;
+    for (int i = 0; i < kNumKnobs; ++i)
+    {
+        if (kKnobs[i].filterKey != key) continue;
+        if (!out.empty()) out += L" ・ ";
+        out += KnobValueText (kKnobs[i], KnobValue (kKnobs[i]));
+    }
+    return out;
+}
+
+void PaintList (HWND hwnd, HDC hdc)
+{
+    RECT client {};
+    GetClientRect (hwnd, &client);
     const int W = (int) (client.right - client.left), H = (int) (client.bottom - client.top);
     HDC mem = CreateCompatibleDC (hdc);
-    HBITMAP bmp = CreateCompatibleBitmap (hdc, W, H);
+    HBITMAP bmp = CreateCompatibleBitmap (hdc, W, H + g_boardScroll + 2);
     HGDIOBJ oldBmp = SelectObject (mem, bmp);
     {
         Gdiplus::Graphics g (mem);
         g.SetSmoothingMode (Gdiplus::SmoothingModeAntiAlias);
-        g.Clear (Gdiplus::Color (255, 34, 36, 40));
-        g.TranslateTransform (0.0f, (float) -g_boardScroll);
-
+        g.SetTextRenderingHint (Gdiplus::TextRenderingHintClearTypeGridFit);
         const Gdiplus::Color kText (255, 228, 230, 234);
         const Gdiplus::Color kDim (255, 150, 154, 160);
-
-        // Backplates.
-        for (const auto& pg : g_plates)
+        Gdiplus::SolidBrush bg (Gdiplus::Color (255, 30, 31, 36));
+        g.FillRectangle (&bg, 0, 0, W, H + g_boardScroll + 2);
+        LayoutList();
+        for (const auto& gg : g_groupGeoms)
         {
-            FillRoundRect (g, pg.rc, 8, Gdiplus::Color (255, 46, 49, 56));
-            StrokeRoundRect (g, pg.rc, 8, Gdiplus::Color (255, 84, 88, 98));
-            if (pg.first)
-            {
-                const OrderBlock& blk = g_edit.blocks[(size_t) pg.blockIdx];
-                RECT nameRc { pg.rc.left + 10, pg.rc.top + 1, pg.foldRc.left - 4, pg.rc.top + 21 };
-                DrawText (g, blk.name, nameRc, 9, kText, false, true);
-                const bool wideBtns = (pg.foldRc.right - pg.foldRc.left) >= 40;
-                DrawText (g, wideBtns ? L"閉じる" : L"－", pg.foldRc, 8, kDim, true);
-                DrawText (g, wideBtns ? L"解散" : L"×", pg.dissolveRc, 8, kDim, true);
-            }
+            RECT nameRc { gg.rc.left + 4, gg.rc.top, gg.toggleRc.left - 8, gg.rc.bottom };
+            DrawText (g, kFilterGroups[gg.groupIdx].name, nameRc, 11, kText, false, true);
+            bool allOn, anyOn;
+            GroupState (gg.groupIdx, allOn, anyOn);
+            const Gdiplus::Color fill = allOn ? Gdiplus::Color (255, 38, 84, 52)
+                                        : anyOn ? Gdiplus::Color (255, 120, 92, 30)
+                                                : Gdiplus::Color (255, 58, 61, 68);
+            FillRoundRect (g, gg.toggleRc, 8, fill);
+            DrawText (g, allOn ? L"ON" : anyOn ? L"一部ON" : L"OFF", gg.toggleRc, 8,
+                      (allOn || anyOn) ? kText : kDim, true);
         }
-        // Collapsed chips.
-        for (const auto& cg : g_chips)
+        for (const auto& rg : g_rows)
         {
-            const OrderBlock& blk = g_edit.blocks[(size_t) cg.blockIdx];
-            FillRoundRect (g, cg.rc, 8, Gdiplus::Color (255, 52, 55, 62));
-            StrokeRoundRect (g, cg.rc, 8, Gdiplus::Color (255, 96, 100, 110));
-            RECT nameRc { cg.rc.left + 10, cg.rc.top, cg.unfoldRc.left - 4, cg.rc.bottom };
-            DrawText (g, L"▶ " + blk.name + L"（" + std::to_wstring (blk.filters.size()) + L"）",
-                      nameRc, 10, kText, false, true);
-            DrawText (g, L"開く", cg.unfoldRc, 9, kDim, true);
-        }
-        // Cards.
-        for (const auto& cg : g_cards)
-        {
-            const FilterInfo* info = FindFilter (cg.key);
-            const bool on = g_edit.on.count (cg.key) && g_edit.on.at (cg.key);
-            const Gdiplus::Color accent = AccentFor (cg.orderPos, on);
-            FillRoundRect (g, cg.rc, 8, Gdiplus::Color (255, 48, 51, 58));
-            if (cg.key == g_selKey)
-                StrokeRoundRect (g, cg.rc, 8, Gdiplus::Color (255, 235, 238, 242), 2.0f);
-            else
-                StrokeRoundRect (g, cg.rc, 8, Gdiplus::Color (255, 76, 79, 88));
-            RECT strip { cg.rc.left + 8, cg.rc.top + 4, cg.rc.right - 8, cg.rc.top + 7 };
-            FillRoundRect (g, strip, 1.5f, accent);
-            RECT titleRc { cg.rc.left + 9, cg.rc.top + 9, cg.rc.right - 24, cg.rc.top + 29 };
-            DrawText (g, info ? info->label : L"?", titleRc, 9.0f,
-                      on ? kText : kDim, false, true);
-            // Power LED.
-            const POINT pc { cg.rc.right - 15, cg.rc.top + 18 };
-            Gdiplus::SolidBrush led (on ? Gdiplus::Color (255, 92, 224, 130)
-                                        : Gdiplus::Color (255, 74, 77, 84));
-            g.FillEllipse (&led, pc.x - 6, pc.y - 6, 12, 12);
-            // Order badge.
-            RECT badgeRc { cg.rc.left + 9, cg.rc.bottom - 18, cg.rc.left + 40, cg.rc.bottom - 2 };
-            DrawText (g, L"#" + std::to_wstring (cg.orderPos + 1), badgeRc, 8, kDim);
-            // Solo pill: audition this filter alone (preset untouched).
+            const bool on = FilterOn (rg.key);
+            const FilterInfo* info = FindFilterInfo (rg.key);
+            FillRoundRect (g, rg.rc, 8, on ? Gdiplus::Color (255, 54, 57, 64)
+                                           : Gdiplus::Color (255, 40, 42, 47));
+            if (g_selKey == rg.key)
+                StrokeRoundRect (g, rg.rc, 8, Gdiplus::Color (255, 235, 238, 242), 1.5f);
+            FillRoundRect (g, rg.powerRc, 8, on ? Gdiplus::Color (255, 38, 84, 52)
+                                                : Gdiplus::Color (255, 58, 61, 68));
+            DrawText (g, on ? L"ON" : L"OFF", rg.powerRc, 8, on ? kText : kDim, true);
+            RECT nameRc { rg.rc.left + 74, rg.rc.top, rg.rc.right - 340, rg.rc.bottom };
+            DrawText (g, info ? info->label : L"?", nameRc, 10, on ? kText : kDim, false, true);
+            const std::wstring sum = RowSummary (rg.key);
+            if (!sum.empty())
             {
-                const bool soloOn = !g_soloKey.empty() && g_soloKey == cg.key;
-                FillRoundRect (g, cg.soloRc, 6, soloOn ? Gdiplus::Color (255, 148, 106, 24)
-                                                       : Gdiplus::Color (255, 58, 61, 68));
-                DrawText (g, soloOn ? L"ソロ中" : L"ソロ", cg.soloRc, 8,
-                          soloOn ? kText : kDim, true);
+                RECT sumRc { rg.rc.right - 336, rg.rc.top, rg.soloRc.left - 10, rg.rc.bottom };
+                Gdiplus::FontFamily fam (L"MS UI Gothic");
+                Gdiplus::Font font (&fam, 8.5f, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
+                Gdiplus::SolidBrush brush (kDim);
+                Gdiplus::StringFormat fmt;
+                fmt.SetAlignment (Gdiplus::StringAlignmentFar);
+                fmt.SetLineAlignment (Gdiplus::StringAlignmentCenter);
+                fmt.SetTrimming (Gdiplus::StringTrimmingEllipsisCharacter);
+                fmt.SetFormatFlags (Gdiplus::StringFormatFlagsNoWrap);
+                Gdiplus::RectF rf ((float) sumRc.left, (float) sumRc.top,
+                                   (float) (sumRc.right - sumRc.left), (float) (sumRc.bottom - sumRc.top));
+                g.DrawString (sum.c_str(), -1, &font, rf, &fmt, &brush);
             }
-            // Breath pill (gate).
-            if (cg.hasBreath)
-            {
-                const bool bOn = g_edit.on.count ("breath") && g_edit.on.at ("breath");
-                FillRoundRect (g, cg.breathRc, 8, bOn ? Gdiplus::Color (255, 66, 92, 74)
-                                                      : Gdiplus::Color (255, 58, 61, 68));
-                DrawText (g, L"吐息キープ", cg.breathRc, 8, bOn ? kText : kDim, true);
-            }
-            // Knobs.
-            for (const auto& kg : cg.knobs)
-            {
-                const double v = KnobValue (*kg.def);
-                const auto& range = MicFilterParams::rangeFor (kg.def->paramId);
-                const double t = (v - range.min) / (range.max - range.min);
-                const float ang = (float) (-225.0 + t * 270.0); // degrees, 0 = east
-                const float rad = ang * 3.14159265f / 180.0f;
-                RECT labelRc { kg.center.x - 36, kg.center.y - 37, kg.center.x + 36, kg.center.y - 21 };
-                DrawText (g, kg.def->label, labelRc, 8, on ? kText : kDim, true);
-                Gdiplus::SolidBrush body (Gdiplus::Color (255, 26, 27, 31));
-                g.FillEllipse (&body, kg.center.x - kKnobR, kg.center.y - kKnobR,
-                               kKnobR * 2, kKnobR * 2);
-                Gdiplus::Pen rim (accent, 2.0f);
-                g.DrawEllipse (&rim, kg.center.x - kKnobR, kg.center.y - kKnobR,
-                               kKnobR * 2, kKnobR * 2);
-                Gdiplus::Pen ptr (on ? kText : kDim, 2.5f);
-                g.DrawLine (&ptr, (float) kg.center.x, (float) kg.center.y,
-                            kg.center.x + (float) (std::cos (rad) * (kKnobR - 3)),
-                            kg.center.y + (float) (std::sin (rad) * (kKnobR - 3)));
-                RECT valRc { kg.center.x - 36, kg.center.y + 19, kg.center.x + 36, kg.center.y + 35 };
-                DrawText (g, KnobValueOnly (*kg.def, v), valRc, 8, on ? kText : kDim, true);
-            }
-            if (cg.knobs.empty())
-            {
-                // Neutral level-bars motif for knob-less modules.
-                const int bx = (cg.rc.left + cg.rc.right) / 2, by = cg.rc.top + 88;
-                const int hs[5] = { 10, 18, 26, 14, 21 };
-                for (int i = 0; i < 5; ++i)
-                {
-                    RECT bar { bx - 22 + i * 10, by - hs[i] / 2, bx - 16 + i * 10, by + hs[i] / 2 };
-                    FillRoundRect (g, bar, 2, on ? accent : Gdiplus::Color (255, 84, 87, 94));
-                }
-            }
-        }
-        // Flow arrows between neighbours in a row.
-        for (size_t i = 0; i + 1 < g_cards.size(); ++i)
-        {
-            const RECT& a = g_cards[i].rc;
-            const RECT& b = g_cards[i + 1].rc;
-            if (a.top == b.top && b.left > a.right)
-            {
-                const int cx = (a.right + b.left) / 2, cy = a.top + kCardH / 2;
-                Gdiplus::SolidBrush br (Gdiplus::Color (255, 120, 124, 132));
-                Gdiplus::Point pts[3] = { { cx - 3, cy - 5 }, { cx - 3, cy + 5 }, { cx + 4, cy } };
-                g.FillPolygon (&br, pts, 3);
-            }
-        }
-        // Drop caret.
-        if (g_bDragging && g_bHasDrop)
-        {
-            Gdiplus::SolidBrush br (Gdiplus::Color (255, 250, 200, 90));
-            g.FillRectangle (&br, (float) g_bCaret.left, (float) g_bCaret.top,
-                             3.0f, (float) (g_bCaret.bottom - g_bCaret.top));
+            const bool soloOn = !g_soloKey.empty() && g_soloKey == rg.key;
+            FillRoundRect (g, rg.soloRc, 8, soloOn ? Gdiplus::Color (255, 148, 106, 24)
+                                                    : Gdiplus::Color (255, 58, 61, 68));
+            DrawText (g, soloOn ? L"ソロ中" : L"ソロ", rg.soloRc, 8, soloOn ? kText : kDim, true);
         }
         if (g_editLocked)
         {
-            Gdiplus::SolidBrush wash (Gdiplus::Color (46, 190, 196, 205));
-            g.FillRectangle (&wash, 0, g_boardScroll, W, H);
+            Gdiplus::SolidBrush wash (Gdiplus::Color (40, 190, 196, 205));
+            g.FillRectangle (&wash, 0, 0, W, H + g_boardScroll + 2);
         }
     }
-    BitBlt (hdc, 0, 0, W, H, mem, 0, 0, SRCCOPY);
+    BitBlt (hdc, 0, 0, W, H, mem, 0, g_boardScroll, SRCCOPY);
     SelectObject (mem, oldBmp);
     DeleteObject (bmp);
     DeleteDC (mem);
@@ -671,199 +433,236 @@ void RefreshBoard()
     if (g_board) InvalidateRect (g_board, nullptr, FALSE);
 }
 
-// --- Hit testing & dropping ----------------------------------------------------
-struct Hit
+bool InRect (const RECT& rc, POINT pt)
 {
-    int kind = 0; // 1 knob, 2 power, 3 breath, 4 card, 5 plate tab, 6 fold, 7 dissolve, 8 chip, 9 unfold, 10 solo
-    const CardGeom* card = nullptr;
-    const KnobDef* knob = nullptr;
-    int blockIdx = -1;
+    return pt.x >= rc.left && pt.x < rc.right && pt.y >= rc.top && pt.y < rc.bottom;
+}
+
+struct ListHit
+{
+    int kind = 0; // 1 power, 2 solo, 3 group toggle, 4 row
+    const RowGeom* row = nullptr;
+    int groupIdx = -1;
 };
 
-bool InRect (const RECT& rc, POINT pt) { return pt.x >= rc.left && pt.x < rc.right && pt.y >= rc.top && pt.y < rc.bottom; }
-
-Hit HitTest (POINT pt)
+ListHit HitList (POINT pt)
 {
-    Hit h;
-    for (const auto& pg : g_plates)
-        if (pg.first)
-        {
-            if (InRect (pg.foldRc, pt)) { h.kind = 6; h.blockIdx = pg.blockIdx; return h; }
-            if (InRect (pg.dissolveRc, pt)) { h.kind = 7; h.blockIdx = pg.blockIdx; return h; }
-        }
-    for (const auto& cg : g_chips)
+    ListHit h;
+    for (const auto& gg : g_groupGeoms)
+        if (InRect (gg.toggleRc, pt)) { h.kind = 3; h.groupIdx = gg.groupIdx; return h; }
+    for (const auto& rg : g_rows)
     {
-        if (InRect (cg.unfoldRc, pt)) { h.kind = 9; h.blockIdx = cg.blockIdx; return h; }
-        if (InRect (cg.rc, pt)) { h.kind = 8; h.blockIdx = cg.blockIdx; return h; }
+        if (InRect (rg.powerRc, pt)) { h.kind = 1; h.row = &rg; return h; }
+        if (InRect (rg.soloRc, pt)) { h.kind = 2; h.row = &rg; return h; }
+        if (InRect (rg.rc, pt)) { h.kind = 4; h.row = &rg; return h; }
     }
-    for (const auto& cg : g_cards)
-    {
-        for (const auto& kg : cg.knobs)
-        {
-            const int dx = pt.x - kg.center.x, dy = pt.y - kg.center.y;
-            if (dx * dx + dy * dy <= (kKnobR + 4) * (kKnobR + 4))
-            {
-                h.kind = 1; h.card = &cg; h.knob = kg.def; return h;
-            }
-        }
-        const POINT pc { cg.rc.right - 15, cg.rc.top + 18 };
-        const int dx = pt.x - pc.x, dy = pt.y - pc.y;
-        if (dx * dx + dy * dy <= 11 * 11) { h.kind = 2; h.card = &cg; return h; }
-        if (cg.hasBreath && InRect (cg.breathRc, pt)) { h.kind = 3; h.card = &cg; return h; }
-        if (InRect (cg.soloRc, pt)) { h.kind = 10; h.card = &cg; return h; }
-    }
-    for (const auto& pg : g_plates)
-        if (InRect (pg.tabRc, pt)) { h.kind = 5; h.blockIdx = pg.blockIdx; return h; }
-    for (const auto& cg : g_cards)
-        if (InRect (cg.rc, pt)) { h.kind = 4; h.card = &cg; return h; }
     return h;
 }
 
-bool IsDraggedKey (const std::string& key)
-{
-    if (g_bDragKind == 1) return key == g_bDragKey;
-    if (g_bDragKind == 2 && g_bDragBlock >= 0 && g_bDragBlock < (int) g_edit.blocks.size())
-        for (const auto& k : g_edit.blocks[(size_t) g_bDragBlock].filters)
-            if (k == key) return true;
-    return false;
-}
+// --- Per-filter settings dialog -----------------------------------------
+// Opened by double-clicking a row: the filter's own window with an
+// on/off checkbox and one slider per knob (plus the breath checkbox
+// for the gate). Changes apply live; the preset file is untouched for
+// protected presets (controls disabled there instead).
+std::string g_dlgKey;
+HWND g_dlg = nullptr;
+bool g_dlgDone = false;
+constexpr int D_ONOFF = 3001;
+constexpr int D_BREATH = 3002;
+constexpr int D_CLOSE = 3003;
+constexpr int D_TRACK0 = 3100; // + knob index
+constexpr int D_LABEL0 = 3200; // + knob index
 
-struct Anchor
+std::vector<const KnobDef*> DialogKnobs()
 {
-    std::string key;   // card key, or first member key for a chip
-    int blockIdx = -1; // block the anchor belongs to (chip: its block)
-    POINT center { 0, 0 };
-    RECT rc {};
-};
-
-std::vector<Anchor> BuildAnchors()
-{
-    std::vector<Anchor> out;
-    std::set<int> emitted;
-    for (const auto& key : g_edit.order)
-    {
-        if (IsDraggedKey (key)) continue;
-        const int b = BlockOf (key);
-        if (b >= 0 && g_edit.blocks[(size_t) b].collapsed)
-        {
-            if (emitted.count (b)) continue;
-            emitted.insert (b);
-            for (const auto& cg : g_chips)
-                if (cg.blockIdx == b)
-                {
-                    Anchor a;
-                    a.key = key;
-                    a.blockIdx = b;
-                    a.rc = cg.rc;
-                    a.center = { (cg.rc.left + cg.rc.right) / 2, (cg.rc.top + cg.rc.bottom) / 2 };
-                    out.push_back (a);
-                }
-            continue;
-        }
-        for (const auto& cg : g_cards)
-            if (cg.key == key)
-            {
-                Anchor a;
-                a.key = key;
-                a.blockIdx = b;
-                a.rc = cg.rc;
-                a.center = { (cg.rc.left + cg.rc.right) / 2, (cg.rc.top + cg.rc.bottom) / 2 };
-                out.push_back (a);
-            }
-    }
+    std::vector<const KnobDef*> out;
+    for (int i = 0; i < kNumKnobs; ++i)
+        if (kKnobs[i].filterKey == g_dlgKey) out.push_back (&kKnobs[i]);
     return out;
 }
 
-void ComputeDrop (POINT pt)
+int TrackTicks (const KnobDef& def)
 {
-    const std::vector<Anchor> anchors = BuildAnchors();
-    g_bDropBefore.clear();
-    g_bDropInside.clear();
-    g_bHasDrop = true;
-    size_t ins = anchors.size();
-    for (size_t i = 0; i < anchors.size(); ++i)
-    {
-        const Anchor& a = anchors[i];
-        if (pt.y < a.rc.top || (pt.y < a.rc.bottom && pt.x < a.center.x)) { ins = i; break; }
-    }
-    if (ins < anchors.size()) g_bDropBefore = anchors[ins].key;
-    // Inside a block: dropped on a chip, or between two members of one block.
-    for (const auto& cg : g_chips)
-        if (InRect (cg.rc, pt) && cg.blockIdx != g_bDragBlock)
-        {
-            g_bDropInside = g_edit.blocks[(size_t) cg.blockIdx].name;
-            return;
-        }
-    if (ins > 0 && ins < anchors.size())
-    {
-        const int pb = anchors[ins - 1].blockIdx, nb = anchors[ins].blockIdx;
-        if (pb >= 0 && pb == nb && pb != g_bDragBlock)
-            g_bDropInside = g_edit.blocks[(size_t) pb].name;
-    }
-    // Caret geometry.
-    if (ins < anchors.size())
-    {
-        const RECT& r = anchors[ins].rc;
-        g_bCaret = { r.left - 8, r.top, r.left - 5, r.bottom };
-    }
-    else if (!anchors.empty())
-    {
-        const RECT& r = anchors.back().rc;
-        g_bCaret = { r.right + 5, r.top, r.right + 8, r.bottom };
-    }
-    else g_bHasDrop = false;
+    const auto& r = MicFilterParams::rangeFor (def.paramId);
+    const double span = (double) r.max - r.min;
+    int ticks = def.step > 0 ? (int) std::lround (span / def.step) : 100;
+    return std::max (2, std::min (400, ticks));
 }
 
-void ApplyDrop()
+int TrackPos (const KnobDef& def, double v)
 {
-    auto& ord = g_edit.order;
-    auto insertPos = [&] {
-        if (g_bDropBefore.empty()) return ord.end();
-        return std::find (ord.begin(), ord.end(), g_bDropBefore);
-    };
-    if (g_bDragKind == 1)
-    {
-        const std::string key = g_bDragKey;
-        const int oldBlock = BlockOf (key);
-        if (oldBlock >= 0)
-        {
-            auto& f = g_edit.blocks[(size_t) oldBlock].filters;
-            f.erase (std::remove (f.begin(), f.end(), key), f.end());
-            if (f.empty()) g_edit.blocks.erase (g_edit.blocks.begin() + oldBlock);
-        }
-        ord.erase (std::remove (ord.begin(), ord.end(), key), ord.end());
-        ord.insert (insertPos(), key);
-        if (!g_bDropInside.empty())
-            for (auto& blk : g_edit.blocks)
-                if (blk.name == g_bDropInside)
-                {
-                    blk.filters.push_back (key);
-                    std::sort (blk.filters.begin(), blk.filters.end(),
-                               [&] (const std::string& a, const std::string& b) {
-                                   return std::find (ord.begin(), ord.end(), a) <
-                                          std::find (ord.begin(), ord.end(), b);
-                               });
-                    break;
-                }
-        g_selKey = key;
-    }
-    else if (g_bDragKind == 2 && g_bDragBlock >= 0 && g_bDragBlock < (int) g_edit.blocks.size())
-    {
-        const std::vector<std::string> chunk = g_edit.blocks[(size_t) g_bDragBlock].filters;
-        for (const auto& k : chunk)
-            ord.erase (std::remove (ord.begin(), ord.end(), k), ord.end());
-        ord.insert (insertPos(), chunk.begin(), chunk.end());
-    }
-    Commit();
-    RefreshBoard();
+    const auto& r = MicFilterParams::rangeFor (def.paramId);
+    const double t = (v - r.min) / ((double) r.max - r.min);
+    return (int) std::lround (t * TrackTicks (def));
 }
 
-void ClampBoardScroll()
+double TrackValue (const KnobDef& def, int pos)
 {
-    RECT client {};
-    GetClientRect (g_board, &client);
-    const int maxScroll = std::max (0, g_contentH - (int) (client.bottom - client.top));
-    g_boardScroll = std::clamp (g_boardScroll, 0, maxScroll);
+    const auto& r = MicFilterParams::rangeFor (def.paramId);
+    double v = r.min + ((double) r.max - r.min) * pos / TrackTicks (def);
+    if (def.step > 0) v = r.min + std::round ((v - r.min) / def.step) * def.step;
+    return std::max ((double) r.min, std::min ((double) r.max, v));
+}
+
+void DialogRefreshLabels (HWND hwnd)
+{
+    const auto knobs = DialogKnobs();
+    for (size_t i = 0; i < knobs.size(); ++i)
+    {
+        HWND lab = GetDlgItem (hwnd, D_LABEL0 + (int) i);
+        if (lab) SetWindowTextW (lab, KnobValueText (*knobs[i], KnobValue (*knobs[i])).c_str());
+    }
+}
+
+LRESULT CALLBACK FilterDlgProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg)
+    {
+        case WM_CREATE:
+        {
+            const FilterInfo* info = FindFilterInfo (g_dlgKey);
+            const bool locked = g_editLocked;
+            HWND chk = CreateWindowW (L"BUTTON", info ? info->label : L"フィルター",
+                                      WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                      16, 12, 380, 22, hwnd,
+                                      reinterpret_cast<HMENU> ((INT_PTR) D_ONOFF),
+                                      nullptr, nullptr);
+            SendMessageW (chk, WM_SETFONT, (WPARAM) g_font, TRUE);
+            SendMessageW (chk, BM_SETCHECK, FilterOn (g_dlgKey) ? BST_CHECKED : BST_UNCHECKED, 0);
+            EnableWindow (chk, locked ? FALSE : TRUE);
+            int y = 48;
+            const auto knobs = DialogKnobs();
+            if (knobs.empty())
+            {
+                HWND st = CreateWindowW (L"STATIC", L"調整できる項目はありません",
+                                         WS_CHILD | WS_VISIBLE, 16, y, 380, 20, hwnd,
+                                         nullptr, nullptr, nullptr);
+                SendMessageW (st, WM_SETFONT, (WPARAM) g_font, TRUE);
+                y += 30;
+            }
+            for (size_t i = 0; i < knobs.size(); ++i)
+            {
+                HWND lab = CreateWindowW (L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+                                         16, y, 380, 18, hwnd,
+                                         reinterpret_cast<HMENU> ((INT_PTR) (D_LABEL0 + (int) i)),
+                                         nullptr, nullptr);
+                SendMessageW (lab, WM_SETFONT, (WPARAM) g_font, TRUE);
+                HWND tr = CreateWindowW (TRACKBAR_CLASSW, L"",
+                                         WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS,
+                                         16, y + 18, 380, 26, hwnd,
+                                         reinterpret_cast<HMENU> ((INT_PTR) (D_TRACK0 + (int) i)),
+                                         nullptr, nullptr);
+                SendMessageW (tr, TBM_SETRANGE, TRUE, MAKELPARAM (0, TrackTicks (*knobs[i])));
+                SendMessageW (tr, TBM_SETPOS, TRUE, TrackPos (*knobs[i], KnobValue (*knobs[i])));
+                EnableWindow (tr, locked ? FALSE : TRUE);
+                y += 52;
+            }
+            if (g_dlgKey == "gate")
+            {
+                HWND br = CreateWindowW (L"BUTTON", L"吐息キープ（息の音を残す）",
+                                         WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                         16, y, 380, 22, hwnd,
+                                         reinterpret_cast<HMENU> ((INT_PTR) D_BREATH),
+                                         nullptr, nullptr);
+                SendMessageW (br, WM_SETFONT, (WPARAM) g_font, TRUE);
+                SendMessageW (br, BM_SETCHECK, FilterOn ("breath") ? BST_CHECKED : BST_UNCHECKED, 0);
+                EnableWindow (br, locked ? FALSE : TRUE);
+                y += 32;
+            }
+            HWND cl = CreateWindowW (L"BUTTON", L"閉じる", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                                     296, y + 4, 100, 28, hwnd,
+                                     reinterpret_cast<HMENU> ((INT_PTR) D_CLOSE),
+                                     nullptr, nullptr);
+            SendMessageW (cl, WM_SETFONT, (WPARAM) g_font, TRUE);
+            DialogRefreshLabels (hwnd);
+            return 0;
+        }
+        case WM_COMMAND:
+        {
+            const int id = LOWORD (wp);
+            if (id == D_CLOSE) { DestroyWindow (hwnd); return 0; }
+            if (id == D_ONOFF && !g_editLocked)
+            {
+                g_edit.on[g_dlgKey] = SendMessageW ((HWND) lp, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                Commit();
+                RefreshBoard();
+                return 0;
+            }
+            if (id == D_BREATH && !g_editLocked)
+            {
+                g_edit.on["breath"] = SendMessageW ((HWND) lp, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                Commit();
+                RefreshBoard();
+                return 0;
+            }
+            break;
+        }
+        case WM_HSCROLL:
+        {
+            if (g_editLocked) return 0;
+            const auto knobs = DialogKnobs();
+            for (size_t i = 0; i < knobs.size(); ++i)
+            {
+                if ((HWND) lp != GetDlgItem (hwnd, D_TRACK0 + (int) i)) continue;
+                const int pos = (int) SendMessageW ((HWND) lp, TBM_GETPOS, 0, 0);
+                g_edit.values[knobs[i]->valueKey] = TrackValue (*knobs[i], pos);
+                Commit();
+                DialogRefreshLabels (hwnd);
+                RefreshBoard();
+            }
+            return 0;
+        }
+        case WM_CLOSE:
+            DestroyWindow (hwnd);
+            return 0;
+        case WM_DESTROY:
+            g_dlg = nullptr;
+            g_dlgDone = true;
+            return 0;
+    }
+    return DefWindowProcW (hwnd, msg, wp, lp);
+}
+
+void ShowFilterDialog (const std::string& key)
+{
+    g_dlgKey = key;
+    g_dlgDone = false;
+    static bool reg = false;
+    if (!reg)
+    {
+        WNDCLASSW wc {};
+        wc.lpfnWndProc = FilterDlgProc;
+        wc.hInstance = GetModuleHandleW (nullptr);
+        wc.hCursor = LoadCursorW (nullptr, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH) (COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"MicFilterFilterDlg";
+        RegisterClassW (&wc);
+        reg = true;
+    }
+    INITCOMMONCONTROLSEX icc { sizeof (icc), ICC_BAR_CLASSES };
+    InitCommonControlsEx (&icc);
+    const FilterInfo* info = FindFilterInfo (key);
+    std::wstring title = info ? info->label : L"フィルター設定";
+    const int knobCount = (int) DialogKnobs().size();
+    const int height = 48 + (knobCount ? knobCount * 52 : 30) + (key == "gate" ? 32 : 0) + 52;
+    EnableWindow (g_win, FALSE);
+    RECT wr {};
+    GetWindowRect (g_win, &wr);
+    const int dx = (int) (wr.left + ((wr.right - wr.left) - 428) / 2);
+    const int dy = (int) (wr.top + ((wr.bottom - wr.top) - height) / 2);
+    g_dlg = CreateWindowW (L"MicFilterFilterDlg", title.c_str(),
+                           WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                           dx, dy, 428, height,
+                           g_win, nullptr, GetModuleHandleW (nullptr), nullptr);
+    if (g_dlg) ShowWindow (g_dlg, SW_SHOW);
+    MSG msg {};
+    while (!g_dlgDone && GetMessageW (&msg, nullptr, 0, 0) > 0)
+    {
+        TranslateMessage (&msg);
+        DispatchMessageW (&msg);
+    }
+    EnableWindow (g_win, TRUE);
+    SetForegroundWindow (g_win);
 }
 
 LRESULT CALLBACK BoardProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -874,11 +673,7 @@ LRESULT CALLBACK BoardProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         {
             PAINTSTRUCT ps {};
             HDC hdc = BeginPaint (hwnd, &ps);
-            LayoutBoard();
-            ClampBoardScroll();
-            RECT client {};
-            GetClientRect (hwnd, &client);
-            DrawBoard (hdc, client);
+            PaintList (hwnd, hdc);
             EndPaint (hwnd, &ps);
             return 0;
         }
@@ -887,221 +682,83 @@ LRESULT CALLBACK BoardProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case WM_LBUTTONDOWN:
         {
             SetFocus (hwnd);
-            LayoutBoard();
+            LayoutList();
             const POINT clientPt { (short) LOWORD (lp), (short) HIWORD (lp) };
             const POINT pt { clientPt.x, clientPt.y + g_boardScroll };
-            const Hit h = HitTest (pt);
-            if (h.kind == 10 && h.card)
+            const ListHit h = HitList (pt);
+            if (h.kind == 2 && h.row)
             {
-                // Solo audition: allowed even for locked presets (it
-                // changes no settings), but only while this preset is
-                // the one playing on the main window.
+                // Solo: audition only, allowed even when locked.
                 if (g_editIsMainCurrent)
                 {
-                    g_soloKey = (g_soloKey == h.card->key) ? "" : h.card->key;
+                    g_soloKey = (g_soloKey == h.row->key) ? "" : h.row->key;
                     SendSolo();
-                    g_selKey = h.card->key;
+                    g_selKey = h.row->key;
                     RefreshBoard();
                 }
                 return 0;
             }
             if (g_editLocked)
             {
-                if (h.kind == 4 && h.card) { g_selKey = h.card->key; RefreshBoard(); }
+                if (h.kind == 4 && h.row) { g_selKey = h.row->key; RefreshBoard(); }
                 return 0;
             }
             switch (h.kind)
             {
                 case 1:
-                    g_knobDragDef = h.knob;
-                    g_knobDragStartY = clientPt.y;
-                    g_knobDragStartVal = KnobValue (*h.knob);
-                    if (h.card) g_selKey = h.card->key;
-                    SetCapture (hwnd);
-                    break;
-                case 2:
-                    g_edit.on[h.card->key] = !(g_edit.on.count (h.card->key) && g_edit.on.at (h.card->key));
-                    g_selKey = h.card->key;
+                    g_edit.on[h.row->key] = !FilterOn (h.row->key);
+                    g_selKey = h.row->key;
                     Commit();
                     RefreshBoard();
                     break;
                 case 3:
-                    g_edit.on["breath"] = !(g_edit.on.count ("breath") && g_edit.on.at ("breath"));
+                {
+                    bool allOn, anyOn;
+                    GroupState (h.groupIdx, allOn, anyOn);
+                    const FilterGroupDef& grp = kFilterGroups[h.groupIdx];
+                    for (int i = 0; i < grp.count; ++i) g_edit.on[grp.keys[i]] = !allOn;
                     Commit();
                     RefreshBoard();
                     break;
-                case 6: case 7: case 9:
-                    g_pendingAction = h.kind == 6 ? 1 : h.kind == 7 ? 2 : 3;
-                    g_pendingBlock = h.blockIdx;
-                    SetCapture (hwnd);
-                    break;
-                case 5: case 8:
-                    g_bDragKind = 2;
-                    g_bDragBlock = h.blockIdx;
-                    g_bDragging = false;
-                    g_bDragStart = g_bDragNow = pt;
-                    SetCapture (hwnd);
-                    break;
+                }
                 case 4:
-                    g_selKey = h.card->key;
-                    g_bDragKind = 1;
-                    g_bDragKey = h.card->key;
-                    g_bDragging = false;
-                    g_bDragStart = g_bDragNow = pt;
-                    SetCapture (hwnd);
+                    g_selKey = h.row->key;
                     RefreshBoard();
                     break;
-            }
-            return 0;
-        }
-        case WM_MOUSEMOVE:
-        {
-            const POINT clientPt { (short) LOWORD (lp), (short) HIWORD (lp) };
-            if (g_knobDragDef)
-            {
-                const auto& range = MicFilterParams::rangeFor (g_knobDragDef->paramId);
-                const double span = (wp & MK_SHIFT) ? 1400.0 : 140.0;
-                double v = g_knobDragStartVal +
-                           (g_knobDragStartY - clientPt.y) * (range.max - range.min) / span;
-                v = std::round ((v - range.min) / g_knobDragDef->step) * g_knobDragDef->step + range.min;
-                v = std::clamp (v, (double) range.min, (double) range.max);
-                if (v != KnobValue (*g_knobDragDef))
-                {
-                    g_edit.values[g_knobDragDef->valueKey] = v;
-                    Commit();
-                    RefreshBoard();
-                }
-                return 0;
-            }
-            if ((g_bDragKind == 1 || g_bDragKind == 2) && (wp & MK_LBUTTON))
-            {
-                const POINT pt { clientPt.x, clientPt.y + g_boardScroll };
-                g_bDragNow = pt;
-                if (!g_bDragging &&
-                    (std::abs (pt.x - g_bDragStart.x) > 7 || std::abs (pt.y - g_bDragStart.y) > 7))
-                    g_bDragging = true;
-                if (g_bDragging)
-                {
-                    LayoutBoard();
-                    ComputeDrop (pt);
-                    RefreshBoard();
-                }
-            }
-            return 0;
-        }
-        case WM_LBUTTONUP:
-        {
-            const bool hadCapture = GetCapture() == hwnd;
-            if (g_knobDragDef) { g_knobDragDef = nullptr; ReleaseCapture(); return 0; }
-            if (g_pendingAction)
-            {
-                LayoutBoard();
-                const POINT pt { (short) LOWORD (lp), (short) HIWORD (lp) + g_boardScroll };
-                const Hit h = HitTest (pt);
-                const int want = g_pendingAction == 1 ? 6 : g_pendingAction == 2 ? 7 : 9;
-                if (h.kind == want && h.blockIdx == g_pendingBlock &&
-                    g_pendingBlock >= 0 && g_pendingBlock < (int) g_edit.blocks.size())
-                {
-                    if (g_pendingAction == 1) g_edit.blocks[(size_t) g_pendingBlock].collapsed = true;
-                    else if (g_pendingAction == 2) g_edit.blocks.erase (g_edit.blocks.begin() + g_pendingBlock);
-                    else g_edit.blocks[(size_t) g_pendingBlock].collapsed = false;
-                    Commit();
-                    RefreshBoard();
-                }
-                g_pendingAction = 0;
-                g_pendingBlock = -1;
-                if (hadCapture) ReleaseCapture();
-                return 0;
-            }
-            if (g_bDragKind)
-            {
-                if (g_bDragging) ApplyDrop();
-                g_bDragKind = 0;
-                g_bDragging = false;
-                g_bHasDrop = false;
-                if (hadCapture) ReleaseCapture();
-                RefreshBoard();
-                return 0;
             }
             return 0;
         }
         case WM_LBUTTONDBLCLK:
         {
-            LayoutBoard();
-            const POINT pt { (short) LOWORD (lp), (short) HIWORD (lp) + g_boardScroll };
-            const Hit h = HitTest (pt);
-            g_knobDragDef = nullptr;
-            g_bDragKind = 0;
-            g_bDragging = false;
-            if (g_editLocked) return 0;
-            if (h.kind == 1 && h.knob)
+            LayoutList();
+            const POINT clientPt { (short) LOWORD (lp), (short) HIWORD (lp) };
+            const POINT pt { clientPt.x, clientPt.y + g_boardScroll };
+            const ListHit h = HitList (pt);
+            if (h.kind == 4 && h.row)
             {
-                const auto& range = MicFilterParams::rangeFor (h.knob->paramId);
-                g_edit.values[h.knob->valueKey] = range.def;
-                if (h.card) g_selKey = h.card->key;
-                Commit();
+                g_selKey = h.row->key;
                 RefreshBoard();
-            }
-            else if (h.kind == 5 && h.blockIdx >= 0 && h.blockIdx < (int) g_edit.blocks.size())
-            {
-                std::wstring name;
-                if (PromptText (g_win, L"ブロック名の変更", g_edit.blocks[(size_t) h.blockIdx].name, name))
-                {
-                    g_edit.blocks[(size_t) h.blockIdx].name = name;
-                    Commit();
-                    RefreshBoard();
-                }
-            }
-            else if (h.kind == 8 && h.blockIdx >= 0 && h.blockIdx < (int) g_edit.blocks.size())
-            {
-                g_edit.blocks[(size_t) h.blockIdx].collapsed = false;
-                Commit();
-                RefreshBoard();
+                ShowFilterDialog (h.row->key);
             }
             return 0;
         }
         case WM_MOUSEWHEEL:
         {
-            POINT sp { (short) LOWORD (lp), (short) HIWORD (lp) };
-            ScreenToClient (hwnd, &sp);
-            LayoutBoard();
-            const POINT pt { sp.x, sp.y + g_boardScroll };
-            const Hit h = HitTest (pt);
-            const int notches = (int) GET_WHEEL_DELTA_WPARAM (wp) / 120;
-            if (!g_editLocked && h.kind == 1 && h.knob && notches != 0)
-            {
-                const auto& range = MicFilterParams::rangeFor (h.knob->paramId);
-                double v = KnobValue (*h.knob) + notches * h.knob->step * 4.0;
-                v = std::round ((v - range.min) / h.knob->step) * h.knob->step + range.min;
-                v = std::clamp (v, (double) range.min, (double) range.max);
-                if (v != KnobValue (*h.knob))
-                {
-                    g_edit.values[h.knob->valueKey] = v;
-                    Commit();
-                    RefreshBoard();
-                }
-                return 0;
-            }
-            g_boardScroll -= notches * 46;
-            ClampBoardScroll();
+            RECT client {};
+            GetClientRect (hwnd, &client);
+            const int viewH = (int) (client.bottom - client.top);
+            const int maxScroll = std::max (0, g_contentH - viewH + 8);
+            const int delta = (short) HIWORD (wp);
+            g_boardScroll = std::max (0, std::min (maxScroll, g_boardScroll - delta / 2));
             RefreshBoard();
             return 0;
         }
-        case WM_CAPTURECHANGED:
-            g_knobDragDef = nullptr;
-            g_pendingAction = 0;
-            g_bDragKind = 0;
-            g_bDragging = false;
-            g_bHasDrop = false;
-            RefreshBoard();
-            return 0;
         case WM_SIZE:
             RefreshBoard();
             return 0;
     }
     return DefWindowProcW (hwnd, msg, wp, lp);
 }
-
 // --- Preset bar / editor state ---------------------------------------------------
 void RefreshPresetCombo (const std::wstring& selectName)
 {
@@ -1132,9 +789,6 @@ void ApplyLockState()
     const BOOL en = g_editLocked ? FALSE : TRUE;
     EnableWindow (SCtl (S_PRESET_RENAME), en);
     EnableWindow (SCtl (S_PRESET_DELETE), en);
-    EnableWindow (SCtl (S_BLOCK_CREATE), en);
-    EnableWindow (SCtl (S_NOISE_ON), en);
-    EnableWindow (SCtl (S_NOISE_OFF), en);
     SetWindowTextW (SCtl (S_LOCK_LABEL), g_editLocked ? L"変更不可" : L"");
 }
 
@@ -1144,6 +798,10 @@ void LoadIntoEditor (const std::wstring& name)
     Preset p;
     if (!LoadPreset (name, p)) p = DefaultPreset();
     g_edit = p;
+    // v0.24: the list IS the order. Normalize every edited preset to
+    // the canonical group order; order blocks no longer exist.
+    g_edit.order.assign (kCanonicalStageKeys, kCanonicalStageKeys + kNumCanonicalStageKeys);
+    g_edit.blocks.clear();
     g_editIsMainCurrent = g_edit.name == g_mainCurrent;
     g_editLocked = IsProtectedPreset (g_edit.name);
     g_selKey = "gate";
@@ -1218,25 +876,6 @@ void OnPresetDelete()
     LoadIntoEditor (next);
 }
 
-void OnBlockCreate()
-{
-    if (g_editLocked) return;
-    if (BlockOf (g_selKey) >= 0)
-    {
-        MessageBoxW (g_win, L"選択中のフィルターはすでにブロックの中です", L"MicFilter",
-                     MB_OK | MB_ICONINFORMATION);
-        return;
-    }
-    std::wstring name;
-    if (!PromptText (g_win, L"新規ブロック（並び順用）", L"", name)) return;
-    OrderBlock blk;
-    blk.name = name;
-    blk.filters = { g_selKey };
-    g_edit.blocks.push_back (blk);
-    Commit();
-    RefreshBoard();
-}
-
 LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
@@ -1268,10 +907,8 @@ LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             button (L"名前変更", S_PRESET_RENAME, 528, 8, 68, 25);
             button (L"削除", S_PRESET_DELETE, 600, 8, 50, 25);
 
-            button (L"選択カードからブロック作成", S_BLOCK_CREATE, 16, 42, 180, 25);
-            label (L"「ソロ」＝そのフィルターだけ聞く", 208, 45, 380);
-            button (L"ノイズ除去系 全部ON", S_NOISE_ON, 600, 42, 150, 25);
-            button (L"全部OFF", S_NOISE_OFF, 758, 42, 100, 25);
+            label (L"上から順に音が通ります。「ソロ」＝そのフィルターだけ聞く／行をダブルクリックで詳細設定",
+                   16, 45, 900);
 
             g_board = CreateWindowW (L"MicFilterBoard", L"",
                                      WS_CHILD | WS_VISIBLE | WS_BORDER,
@@ -1302,17 +939,7 @@ LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 case S_PRESET_NEW: OnPresetNew(); return 0;
                 case S_PRESET_RENAME: OnPresetRename(); return 0;
                 case S_PRESET_DELETE: OnPresetDelete(); return 0;
-                case S_BLOCK_CREATE: OnBlockCreate(); return 0;
-                case S_NOISE_ON: case S_NOISE_OFF:
-                {
-                    if (g_editLocked) return 0;
-                    const bool on = (id == S_NOISE_ON);
-                    for (int i = 0; i < kNumNoiseGroupKeys; ++i)
-                        g_edit.on[kNoiseGroupKeys[i]] = on;
-                    Commit();
-                    RefreshBoard();
-                    return 0;
-                }
+
                 case S_APPLY:
                     g_mainCurrent = g_edit.name;
                     g_editIsMainCurrent = true;

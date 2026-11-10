@@ -28,14 +28,40 @@ struct FilterInfo
     int stage;
 };
 
-// The noise-removal family, for the settings window's bulk on/off
-// buttons ("enjoy flipping the whole noise group and hear the change").
-// Not a chain group: just a fixed membership list for bulk switching.
+// The noise-removal family (used by tests/docs; the settings window
+// reaches the same set through the ノイズ除去 group below).
 inline const char* kNoiseGroupKeys[] = {
     "hum", "rnnoise", "spectral", "multiband", "gate", "duck", "declick"
 };
 inline constexpr int kNumNoiseGroupKeys =
     (int) (sizeof (kNoiseGroupKeys) / sizeof (kNoiseGroupKeys[0]));
+
+// Display groups for the settings list (v0.24, the user's wireframe:
+// groups stacked vertically, filters in processing order top to
+// bottom, on/off on both the group and each filter). The canonical
+// stage order is exactly the groups concatenated, "breath" excluded
+// (it is a gate option shown as a row, not a chain stage).
+struct FilterGroupDef
+{
+    const wchar_t* name;
+    const char* keys[8];
+    int count;
+};
+inline const FilterGroupDef kFilterGroups[] = {
+    { L"入力補正", { "declip", "hpf", "hum" }, 3 },
+    { L"ノイズ除去", { "declick", "duck", "rnnoise", "spectral", "multiband", "gate", "breath" }, 7 },
+    { L"音作り", { "autoeq", "eq", "deesser", "comp", "exciter", "bwe" }, 6 },
+    { L"仕上げ", { "limiter" }, 1 },
+};
+inline constexpr int kNumFilterGroups =
+    (int) (sizeof (kFilterGroups) / sizeof (kFilterGroups[0]));
+inline const char* kCanonicalStageKeys[] = {
+    "declip", "hpf", "hum", "declick", "duck", "rnnoise", "spectral",
+    "multiband", "gate", "autoeq", "eq", "deesser", "comp", "exciter",
+    "bwe", "limiter"
+};
+inline constexpr int kNumCanonicalStageKeys =
+    (int) (sizeof (kCanonicalStageKeys) / sizeof (kCanonicalStageKeys[0]));
 
 // Registry order = the group layout the settings window starts from.
 inline const FilterInfo kFilterRegistry[] = {
