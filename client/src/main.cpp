@@ -33,6 +33,7 @@
 // Stored as JSON under <exe dir>\presets and edited in the settings
 // window; the main window only picks which preset is active.
 Preset g_currentPreset = DefaultPreset();
+std::string g_soloKey; // settings-window solo audition: only this filter runs
 
 void ApplyPresetLive();              // defined below
 void RefreshPresetCombo (HWND hwnd); // defined below
@@ -182,8 +183,9 @@ void ApplyPresetLive()
     {
         const FilterInfo& f = kFilterRegistry[i];
         const auto it = g_currentPreset.on.find (f.key);
-        g_engine.SetParameter ((unsigned int) f.paramId,
-                               it != g_currentPreset.on.end() && it->second ? 1.0 : 0.0);
+        bool on = it != g_currentPreset.on.end() && it->second;
+        if (!g_soloKey.empty()) on = (f.key == g_soloKey); // solo audition override
+        g_engine.SetParameter ((unsigned int) f.paramId, on ? 1.0 : 0.0);
     }
     for (int i = 0; i < kNumKnobs; ++i)
     {
@@ -514,6 +516,21 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             RefreshPresetCombo (hwnd);
             if (g_running) ApplyPresetLive();
             (void) before;
+            return 0;
+        }
+        case WM_SOLO_CHANGED:
+        {
+            // Solo audition from the settings window: run only one
+            // filter so its effect can be heard on its own. The preset
+            // itself is never modified by this.
+            if (lp)
+            {
+                g_soloKey = *reinterpret_cast<std::string*> (lp);
+                delete reinterpret_cast<std::string*> (lp);
+            }
+            else g_soloKey.clear();
+            miclog::Write ("solo: %s", g_soloKey.empty() ? "(off)" : g_soloKey.c_str());
+            if (g_running) ApplyPresetLive();
             return 0;
         }
         case WM_TIMER:

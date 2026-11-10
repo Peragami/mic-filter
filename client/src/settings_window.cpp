@@ -32,6 +32,8 @@ constexpr int S_PRESET_RENAME = 2003;
 constexpr int S_LOCK_LABEL = 2019;
 constexpr int S_PRESET_DELETE = 2004;
 constexpr int S_BLOCK_CREATE = 2012;
+constexpr int S_NOISE_ON = 2020;
+constexpr int S_NOISE_OFF = 2021;
 constexpr int S_APPLY = 2017;
 constexpr int S_CLOSE = 2018;
 HWND g_win = nullptr;
@@ -42,6 +44,19 @@ Preset g_edit;
 bool g_editIsMainCurrent = false;
 bool g_editLocked = false; // protected built-in preset (標準 / AIプリセット)
 std::string g_selKey = "gate"; // selected card (for block creation)
+std::string g_soloKey;         // solo audition: only this filter is audible
+
+void SendSolo()
+{
+    if (g_parent)
+        PostMessageW (g_parent, WM_SOLO_CHANGED, 0,
+                      reinterpret_cast<LPARAM> (new std::string (g_soloKey)));
+}
+
+void ClearSolo()
+{
+    if (!g_soloKey.empty()) { g_soloKey.clear(); SendSolo(); }
+}
 int g_boardScroll = 0;
 HFONT g_font = nullptr;
 
@@ -212,6 +227,7 @@ struct CardGeom
     std::vector<KnobGeom> knobs;
     RECT breathRc {};
     bool hasBreath = false;
+    RECT soloRc {};
 };
 struct ChipGeom
 {
@@ -348,6 +364,7 @@ void LayoutBoard()
                 cg.key = u.key;
                 cg.orderPos = orderPos[u.key];
                 cg.rc = { x, cardTop, x + u.width, cardTop + kCardH };
+                cg.soloRc = { cg.rc.left + 44, cg.rc.bottom - 21, cg.rc.left + 84, cg.rc.bottom - 5 };
                 int kn = 0;
                 for (int i = 0; i < kNumKnobs; ++i)
                     if (kKnobs[i].filterKey == u.key) ++kn;
@@ -566,6 +583,14 @@ void DrawBoard (HDC hdc, const RECT& client)
             // Order badge.
             RECT badgeRc { cg.rc.left + 9, cg.rc.bottom - 18, cg.rc.left + 40, cg.rc.bottom - 2 };
             DrawText (g, L"#" + std::to_wstring (cg.orderPos + 1), badgeRc, 8, kDim);
+            // Solo pill: audition this filter alone (preset untouched).
+            {
+                const bool soloOn = !g_soloKey.empty() && g_soloKey == cg.key;
+                FillRoundRect (g, cg.soloRc, 6, soloOn ? Gdiplus::Color (255, 148, 106, 24)
+                                                       : Gdiplus::Color (255, 58, 61, 68));
+                DrawText (g, soloOn ? L"ソロ中" : L"ソロ", cg.soloRc, 8,
+                          soloOn ? kText : kDim, true);
+            }
             // Breath pill (gate).
             if (cg.hasBreath)
             {
@@ -649,7 +674,7 @@ void RefreshBoard()
 // --- Hit testing & dropping ----------------------------------------------------
 struct Hit
 {
-    int kind = 0; // 1 knob, 2 power, 3 breath, 4 card, 5 plate tab, 6 fold, 7 dissolve, 8 chip, 9 unfold
+    int kind = 0; // 1 knob, 2 power, 3 breath, 4 card, 5 plate tab, 6 fold, 7 dissolve, 8 chip, 9 unfold, 10 solo
     const CardGeom* card = nullptr;
     const KnobDef* knob = nullptr;
     int blockIdx = -1;
@@ -685,6 +710,7 @@ Hit HitTest (POINT pt)
         const int dx = pt.x - pc.x, dy = pt.y - pc.y;
         if (dx * dx + dy * dy <= 11 * 11) { h.kind = 2; h.card = &cg; return h; }
         if (cg.hasBreath && InRect (cg.breathRc, pt)) { h.kind = 3; h.card = &cg; return h; }
+        if (InRect (cg.soloRc, pt)) { h.kind = 10; h.card = &cg; return h; }
     }
     for (const auto& pg : g_plates)
         if (InRect (pg.tabRc, pt)) { h.kind = 5; h.blockIdx = pg.blockIdx; return h; }
@@ -865,6 +891,20 @@ LRESULT CALLBACK BoardProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             const POINT clientPt { (short) LOWORD (lp), (short) HIWORD (lp) };
             const POINT pt { clientPt.x, clientPt.y + g_boardScroll };
             const Hit h = HitTest (pt);
+            if (h.kind == 10 && h.card)
+            {
+                // Solo audition: allowed even for locked presets (it
+                // changes no settings), but only while this preset is
+                // the one playing on the main window.
+                if (g_editIsMainCurrent)
+                {
+                    g_soloKey = (g_soloKey == h.card->key) ? "" : h.card->key;
+                    SendSolo();
+                    g_selKey = h.card->key;
+                    RefreshBoard();
+                }
+                return 0;
+            }
             if (g_editLocked)
             {
                 if (h.kind == 4 && h.card) { g_selKey = h.card->key; RefreshBoard(); }
@@ -1093,11 +1133,14 @@ void ApplyLockState()
     EnableWindow (SCtl (S_PRESET_RENAME), en);
     EnableWindow (SCtl (S_PRESET_DELETE), en);
     EnableWindow (SCtl (S_BLOCK_CREATE), en);
+    EnableWindow (SCtl (S_NOISE_ON), en);
+    EnableWindow (SCtl (S_NOISE_OFF), en);
     SetWindowTextW (SCtl (S_LOCK_LABEL), g_editLocked ? L"変更不可" : L"");
 }
 
 void LoadIntoEditor (const std::wstring& name)
 {
+    ClearSolo(); // solo belongs to the previously shown preset
     Preset p;
     if (!LoadPreset (name, p)) p = DefaultPreset();
     g_edit = p;
@@ -1226,8 +1269,9 @@ LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             button (L"削除", S_PRESET_DELETE, 600, 8, 50, 25);
 
             button (L"選択カードからブロック作成", S_BLOCK_CREATE, 16, 42, 180, 25);
-            label (L"カードはドラッグで並び替え／ノブは縦ドラッグ・ホイールで調整、ダブルクリックで初期値",
-                   208, 45, 760);
+            label (L"「ソロ」＝そのフィルターだけ聞く", 208, 45, 380);
+            button (L"ノイズ除去系 全部ON", S_NOISE_ON, 600, 42, 150, 25);
+            button (L"全部OFF", S_NOISE_OFF, 758, 42, 100, 25);
 
             g_board = CreateWindowW (L"MicFilterBoard", L"",
                                      WS_CHILD | WS_VISIBLE | WS_BORDER,
@@ -1259,6 +1303,16 @@ LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 case S_PRESET_RENAME: OnPresetRename(); return 0;
                 case S_PRESET_DELETE: OnPresetDelete(); return 0;
                 case S_BLOCK_CREATE: OnBlockCreate(); return 0;
+                case S_NOISE_ON: case S_NOISE_OFF:
+                {
+                    if (g_editLocked) return 0;
+                    const bool on = (id == S_NOISE_ON);
+                    for (int i = 0; i < kNumNoiseGroupKeys; ++i)
+                        g_edit.on[kNoiseGroupKeys[i]] = on;
+                    Commit();
+                    RefreshBoard();
+                    return 0;
+                }
                 case S_APPLY:
                     g_mainCurrent = g_edit.name;
                     g_editIsMainCurrent = true;
@@ -1269,6 +1323,7 @@ LRESULT CALLBACK SettingsProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             break;
         }
         case WM_CLOSE:
+            ClearSolo();
             DestroyWindow (hwnd);
             return 0;
         case WM_DESTROY:

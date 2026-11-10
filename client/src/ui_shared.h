@@ -26,6 +26,7 @@ constexpr int IDC_VERSION_LABEL = 1015;
 constexpr int IDC_PRESET_COMBO = 1016;
 constexpr int IDC_SETTINGS_BUTTON = 1017;
 constexpr UINT WM_PRESET_CHANGED = WM_APP + 8; // lParam: std::wstring* name to select, or null = rescan only
+constexpr UINT WM_SOLO_CHANGED = WM_APP + 9;    // lParam: std::string* filter key to solo (empty = clear solo)
 constexpr int IDC_FILTER_BASE = 1020; // + index into the filter table in main.cpp
 
 constexpr UINT_PTR kTimerId = 1;

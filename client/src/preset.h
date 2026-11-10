@@ -28,6 +28,15 @@ struct FilterInfo
     int stage;
 };
 
+// The noise-removal family, for the settings window's bulk on/off
+// buttons ("enjoy flipping the whole noise group and hear the change").
+// Not a chain group: just a fixed membership list for bulk switching.
+inline const char* kNoiseGroupKeys[] = {
+    "hum", "rnnoise", "spectral", "multiband", "gate", "duck", "declick"
+};
+inline constexpr int kNumNoiseGroupKeys =
+    (int) (sizeof (kNoiseGroupKeys) / sizeof (kNoiseGroupKeys[0]));
+
 // Registry order = the group layout the settings window starts from.
 inline const FilterInfo kFilterRegistry[] = {
     { "hum",       MicFilterParams::kHumOn,       L"ハムノッチ（電源ブーン除去）", true,  4 },

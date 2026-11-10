@@ -1,6 +1,6 @@
 {
-  "version": "0.22.0",
-  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.22.0.zip",
-  "sha256": "27669dfce2e42e2e140ec9d131d241748a9750868a6f7adcfa19ae6b268ae8b8",
-  "notes": "変更不可の内蔵プリセット「おまかせ」を追加：選ぶだけで全部自動（自動EQ・AIノイズ除去・帯域拡張）できれいな音に"
+  "version": "0.23.0",
+  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.23.0.zip",
+  "sha256": "bcc717cc5c7760cbf86013d3337dc86867948461974ad1e9c486b1d6b27d8e23",
+  "notes": "設定画面に「ソロ試聴」（1フィルターだけ聞ける）と「ノイズ除去系の一括ON/OFF」を追加"
 }
