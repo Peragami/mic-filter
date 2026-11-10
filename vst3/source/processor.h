@@ -1,6 +1,7 @@
 #pragma once
 
 #include "public.sdk/source/vst/vstaudioeffect.h"
+#include "paramids.h"
 #include "Source/dsp/Effects2.h" // ChainV2 (includes PureDsp.h); include dir = mic-filter/
 
 namespace MicFilter {
@@ -35,7 +36,7 @@ public:
 private:
     void syncChainParams ();
     // Plain (real-world) values, indexed by MicFilterParams::ParamID.
-    double values_[32] {};
+    double values_[MicFilterParams::kNumParams] {};
     bool paramsDirty_ = true;
     pure2::ChainV2 chain_;
 };

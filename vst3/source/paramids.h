@@ -40,6 +40,8 @@ enum ParamID : unsigned int
     kRnnoiseOn,       // AI noise removal (RNNoise), default Off: +480 samples latency
     kBweOn,           // AI bandwidth extension, default Off: +480 samples latency
     kBweAmount,
+    kAutoEqOn,        // auto EQ (slow mic-coloration correction), default On: 0 latency
+    kAutoEqAmount,
     kNumParams
 };
 
@@ -85,6 +87,8 @@ inline const Range& rangeFor (int id)
         {   0.0f,   1.0f,   0.0f }, // kRnnoiseOn
         {   0.0f,   1.0f,   0.0f }, // kBweOn
         {   0.0f,   1.5f,   1.0f }, // kBweAmount
+        {   0.0f,   1.0f,   1.0f }, // kAutoEqOn
+        {   0.0f,   1.5f,   1.0f }, // kAutoEqAmount
     };
     return ranges[id];
 }
@@ -107,7 +111,8 @@ inline bool isSwitch (int id)
     return id == kHpfOn || id == kGateOn || id == kEqOn || id == kCompOn || id == kLimiterOn
         || id == kBypass || id == kHumOn || id == kDeclipOn || id == kDeclickOn
         || id == kMultibandOn || id == kDeesserOn || id == kExciterOn || id == kSpectralOn
-        || id == kDuckOn || id == kBreathOn || id == kRnnoiseOn || id == kBweOn;
+        || id == kDuckOn || id == kBreathOn || id == kRnnoiseOn || id == kBweOn
+        || id == kAutoEqOn;
 }
 
 } // namespace MicFilterParams

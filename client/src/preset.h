@@ -36,6 +36,7 @@ inline const FilterInfo kFilterRegistry[] = {
     { "rnnoise",   MicFilterParams::kRnnoiseOn,   L"AIノイズ除去（RNNoise）", false, 5 },
     { "hpf",       MicFilterParams::kHpfOn,       L"ハイパス（低音カット）", true,  3 },
     { "eq",        MicFilterParams::kEqOn,        L"EQ（音質補正）", true,  7 },
+    { "autoeq",    MicFilterParams::kAutoEqOn,    L"自動EQ（マイク補正）", true,  15 },
     { "deesser",   MicFilterParams::kDeesserOn,   L"ディエッサー（サ行を柔らかく）", true,  10 },
     { "exciter",   MicFilterParams::kExciterOn,   L"エキサイター（高音のツヤ）", true,  12 },
     { "bwe",       MicFilterParams::kBweOn,       L"AI帯域拡張（声のツヤ・超解像）", false, 13 },
@@ -82,6 +83,7 @@ inline const KnobDef kKnobs[] = {
     { "comp",     "compThresh",       MicFilterParams::kCompThresh,       L"しきい値", L"dB", 1.0f, 0 },
     { "comp",     "compRatio",        MicFilterParams::kCompRatio,        L"レシオ", L"", 0.5f, 4 },
     { "declick",  "declickThresh",    MicFilterParams::kDeclickThresh,    L"感度", L"", 0.01f, 2 },
+    { "autoeq",   "autoEqAmount",     MicFilterParams::kAutoEqAmount,     L"強さ", L"", 0.05f, 3 },
 };
 inline constexpr int kNumKnobs = (int) (sizeof (kKnobs) / sizeof (kKnobs[0]));
 const KnobDef* FindKnob (const std::string& valueKey);

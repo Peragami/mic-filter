@@ -53,6 +53,8 @@ inline pure2::Params2 paramsFromPlainValues (const double* values)
     p.rnnoise.on = onOf (values, MicFilterParams::kRnnoiseOn);
     p.bwe.on = onOf (values, MicFilterParams::kBweOn);
     p.bwe.amount = plainOf (values, MicFilterParams::kBweAmount);
+    p.autoeq.on = onOf (values, MicFilterParams::kAutoEqOn);
+    p.autoeq.amount = plainOf (values, MicFilterParams::kAutoEqAmount);
     return p;
 }
 

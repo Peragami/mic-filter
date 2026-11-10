@@ -1,6 +1,6 @@
 {
-  "version": "0.20.0",
-  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.20.0.zip",
-  "sha256": "c1f0f02146d17c25968c77d7265a9f77636b56d279ec15a98c1a24269e311e0f",
-  "notes": "設定画面をDAW式ボードUIに刷新（モジュールカード＋ロータリーノブ＋信号フロー配置）"
+  "version": "0.21.0",
+  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.21.0.zip",
+  "sha256": "fd92a23ab909af979a298a8513d9bde66534a9f804f30dae6c448cc1fac201b7",
+  "notes": "自動EQ（マイク補正）を追加：声のバランスを測ってマイクの癖を自動補正（既定ON・遅延なし）"
 }

@@ -15,10 +15,10 @@ int main()
     const Preset def = DefaultPreset();
     CHECK (PresetIsValid (def));
     CHECK (def.on.size() == (size_t) kNumFilterInfos);
-    CHECK (def.order.size() == 15);
-    CHECK (StageOrderIds (def).size() == 15);
+    CHECK (def.order.size() == 16);
+    CHECK (StageOrderIds (def).size() == 16);
     CHECK (StageOrderIds (def)[0] == 0);  // declip first
-    CHECK (StageOrderIds (def)[14] == 14); // limiter last
+    CHECK (StageOrderIds (def)[15] == 14); // limiter last
 
     // Round-trip: modify, serialize, parse, compare.
     Preset p = def;
@@ -27,7 +27,7 @@ int main()
     p.on["gate"] = false;
     p.order = { "limiter", "comp", "gate", "multiband", "eq", "spectral",
                 "rnnoise", "hum", "hpf", "duck", "declick", "declip",
-                "deesser", "exciter", "bwe" };
+                "deesser", "exciter", "bwe", "autoeq" };
     const std::string json = SerializePreset (p);
     Preset q;
     CHECK (ParsePreset (json, q));
@@ -65,7 +65,7 @@ int main()
     CHECK (PresetIsValid (fixed));
     CHECK (fixed.on.at ("gate") == false);       // kept
     CHECK (fixed.on.count ("bogus") == 0);        // dropped
-    CHECK (fixed.order.size() == 15);
+    CHECK (fixed.order.size() == 16);
     CHECK (fixed.order[0] == "limiter");          // user's head kept
 
     // Legacy files carrying the removed "groups" field still parse.

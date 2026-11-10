@@ -477,6 +477,106 @@ struct BreathParams
     bool on = false;
 };
 
+// AutoEq (v0.21): slowly tracks the long-term spectral balance of the
+// voice and applies a gentle corrective EQ toward a target curve
+// ("broadcast voice"). It compensates the fixed coloration of the mic
+// (cheap mics: weak top end, boomy proximity lows). Analysis integrates
+// only while plausible voice is present; correction gains move over
+// seconds, are capped, and add zero latency (plain IIR filtering).
+struct AutoEqParams
+{
+    bool  on = true;
+    float amount = 1.0f;  // 0..1.5 correction strength
+    float maxDb = 5.0f;   // per-band correction cap
+};
+
+struct AutoEq
+{
+    static constexpr int kBands = 5; // LP250, BP500, BP1500 (anchor), BP4000, HP7000
+    pure::Biquad ana[kBands];
+    pure::Biquad cor[4];             // lowshelf 200, peak 500, peak 2500, highshelf 6000
+    float bandPow[kBands] = {};
+    float gainDb[4] = {};
+    float shortPow = 0;
+    double voiceSec = 0;
+    int tick = 0;
+    double sr = 48000;
+    AutoEqParams p;
+    // Target band levels relative to the 1.5 kHz anchor (dB), a typical
+    // long-term speech spectrum as seen through these analysis filters.
+    static constexpr float kTargetDb[kBands] = { 6.5f, 3.0f, 0.0f, -2.5f, -10.5f };
+    static constexpr int kCorBand[4] = { 0, 1, 3, 4 }; // correction i reads band kCorBand[i]
+
+    void prepare (double sampleRate, const AutoEqParams& np)
+    {
+        sr = sampleRate;
+        p = np;
+        ana[0].setLowPass (sr, 250);
+        ana[1].setBandPass (sr, 500, 0.8f);
+        ana[2].setBandPass (sr, 1500, 0.8f);
+        ana[3].setBandPass (sr, 4000, 0.8f);
+        ana[4].setHighPass (sr, 7000);
+        reset();
+    }
+    void setParams (double sampleRate, const AutoEqParams& np) { sr = sampleRate; p = np; }
+    void reset()
+    {
+        for (auto& b : ana) b.reset();
+        for (auto& c : cor) c.reset();
+        for (auto& v : bandPow) v = 0;
+        for (auto& v : gainDb) v = 0;
+        shortPow = 0;
+        voiceSec = 0;
+        tick = 0;
+        refreshCoeffs();
+    }
+    void refreshCoeffs()
+    {
+        cor[0].setShelf (sr, 200, gainDb[0], false);
+        cor[1].setPeak (sr, 500, 0.9f, gainDb[1]);
+        cor[2].setPeak (sr, 2500, 0.9f, gainDb[2]);
+        cor[3].setShelf (sr, 6000, gainDb[3], true);
+    }
+    inline float process (float x)
+    {
+        if (!p.on) return x;
+        // Analysis always runs (cheap); integration is voice-gated.
+        float y[kBands];
+        for (int i = 0; i < kBands; ++i) y[i] = ana[i].process (x);
+        shortPow += (x * x - shortPow) * 0.0005f; // ~40 ms level
+        const float db = 10.0f * std::log10 (shortPow + 1e-12f);
+        const bool voice = db > -52.0f && db < -1.0f && std::fabs (x) < 0.97f;
+        if (voice)
+        {
+            voiceSec += 1.0 / sr;
+            const float a = 1.0f / (3.5f * (float) sr); // ~3.5 s averaging
+            for (int i = 0; i < kBands; ++i) bandPow[i] += (y[i] * y[i] - bandPow[i]) * a;
+        }
+        // Correction targets refresh at ~20 Hz, gains ease toward them.
+        if (++tick >= 2400)
+        {
+            tick = 0;
+            if (voiceSec > 2.0 && bandPow[2] > 1e-10f)
+            {
+                const float fade = (float) std::min (1.0, (voiceSec - 2.0) / 3.0);
+                for (int c = 0; c < 4; ++c)
+                {
+                    const int m = kCorBand[c];
+                    const float diffDb = 10.0f * std::log10 (bandPow[m] / bandPow[2] + 1e-12f);
+                    float want = (kTargetDb[m] - diffDb) * p.amount;
+                    want = std::max (-p.maxDb, std::min (p.maxDb, want)) * fade;
+                    gainDb[c] += (want - gainDb[c]) * 0.04f; // ~1.2 s easing per tick rate
+                }
+                refreshCoeffs();
+            }
+        }
+        float out = x;
+        for (auto& c : cor) out = c.process (out);
+        return out;
+    }
+    float currentGainDb (int c) const { return gainDb[c]; } // for tests/UI
+};
+
 struct Params2
 {
     pure::Params base;             // gain / hpf / eq / gate / comp / limiter
@@ -493,6 +593,7 @@ struct Params2
     BreathParams breath;
     RnnoiseParams rnnoise; // default OFF (opt-in AI noise removal; +480 samples latency)
     BweParams bwe;         // default OFF (opt-in AI bandwidth extension; +480 samples)
+    AutoEqParams autoeq;   // default ON (slow mic-coloration correction; 0 latency)
 };
 
 struct ChainV2
@@ -504,10 +605,11 @@ struct ChainV2
     TransientDuck duck;
     RnnoiseStage rnnoiseStage;
     BweStage bweStage;
+    AutoEq autoEq;
     Params2 p; double sr = 48000;
     float gateEnv=0, gateGain=1, compEnv=0;
 
-    void prepare (double sampleRate) { sr = sampleRate; update(); declip.reset(); declick.reset(); spectral.reset(); duck.reset(); rnnoiseStage.reset(); bweStage.reset(); }
+    void prepare (double sampleRate) { sr = sampleRate; update(); declip.reset(); declick.reset(); spectral.reset(); duck.reset(); rnnoiseStage.reset(); bweStage.reset(); autoEq.prepare (sr, p.autoeq); }
     ~ChainV2() { rnnoiseStage.release(); }
     void setParams (const Params2& np) { p = np; update(); }
     void update()
@@ -526,6 +628,7 @@ struct ChainV2
         duck.prepare (sr, p.duck);
         rnnoiseStage.setParams (p.rnnoise);
         bweStage.prepare (sr, p.bwe);
+        autoEq.setParams (sr, p.autoeq); // no state reset: adaptation survives tweaks
     }
     int latencySamples() const
     {
@@ -541,17 +644,18 @@ struct ChainV2
         STAGE_DECLIP = 0, STAGE_DECLICK, STAGE_DUCK, STAGE_HPF, STAGE_HUM,
         STAGE_RNNOISE, STAGE_SPECTRAL, STAGE_EQ, STAGE_MULTIBAND, STAGE_GATE,
         STAGE_DEESSER, STAGE_COMP, STAGE_EXCITER, STAGE_BWE, STAGE_LIMITER,
+        STAGE_AUTOEQ, // v0.21: appended (ids of existing stages unchanged)
         STAGE_COUNT
     };
     static constexpr int kDefaultStageOrder[STAGE_COUNT] = {
         STAGE_DECLIP, STAGE_DECLICK, STAGE_DUCK, STAGE_HPF, STAGE_HUM,
-        STAGE_RNNOISE, STAGE_SPECTRAL, STAGE_EQ, STAGE_MULTIBAND, STAGE_GATE,
-        STAGE_DEESSER, STAGE_COMP, STAGE_EXCITER, STAGE_BWE, STAGE_LIMITER
+        STAGE_RNNOISE, STAGE_SPECTRAL, STAGE_EQ, STAGE_AUTOEQ, STAGE_MULTIBAND,
+        STAGE_GATE, STAGE_DEESSER, STAGE_COMP, STAGE_EXCITER, STAGE_BWE, STAGE_LIMITER
     };
     int stageOrder[STAGE_COUNT] = {
         STAGE_DECLIP, STAGE_DECLICK, STAGE_DUCK, STAGE_HPF, STAGE_HUM,
-        STAGE_RNNOISE, STAGE_SPECTRAL, STAGE_EQ, STAGE_MULTIBAND, STAGE_GATE,
-        STAGE_DEESSER, STAGE_COMP, STAGE_EXCITER, STAGE_BWE, STAGE_LIMITER
+        STAGE_RNNOISE, STAGE_SPECTRAL, STAGE_EQ, STAGE_AUTOEQ, STAGE_MULTIBAND,
+        STAGE_GATE, STAGE_DEESSER, STAGE_COMP, STAGE_EXCITER, STAGE_BWE, STAGE_LIMITER
     };
     // Accept only an exact permutation of all stages; anything else is
     // ignored so a corrupt preset cannot break the chain.
@@ -581,6 +685,7 @@ struct ChainV2
             case STAGE_EQ:
                 if (p.base.eqOn) { x = low.process (x); x = mid.process (x); x = high.process (x); }
                 return x;
+            case STAGE_AUTOEQ: return autoEq.process (x);
             case STAGE_MULTIBAND: return multiband.process (x);
             case STAGE_GATE:
             {
