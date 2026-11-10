@@ -94,6 +94,13 @@ int main()
     CHECK (BuiltinAiPreset().name == L"AIプリセット");
     CHECK (BuiltinAiPreset().on.at ("rnnoise") == true);
     CHECK (BuiltinAiPreset().on.at ("bwe") == true);
+    CHECK (PresetIsValid (BuiltinAutoPreset()));
+    CHECK (BuiltinAutoPreset().name == L"おまかせ");
+    CHECK (BuiltinAutoPreset().on.at ("rnnoise") == true);
+    CHECK (BuiltinAutoPreset().on.at ("bwe") == true);
+    CHECK (BuiltinAutoPreset().on.at ("autoeq") == true);
+    CHECK (BuiltinAutoPreset().on.at ("breath") == true);
+    CHECK (IsProtectedPreset (L"おまかせ"));
     CHECK (IsProtectedPreset (L"標準"));
     CHECK (IsProtectedPreset (L"AIプリセット"));
     CHECK (!IsProtectedPreset (L"配信テスト"));

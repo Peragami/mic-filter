@@ -88,6 +88,7 @@ void EnsurePresetStore()
     // read-only pair is present and pristine.
     WritePresetRaw (DefaultPreset());
     WritePresetRaw (BuiltinAiPreset());
+    WritePresetRaw (BuiltinAutoPreset());
 }
 
 std::vector<std::wstring> ListPresetNames()

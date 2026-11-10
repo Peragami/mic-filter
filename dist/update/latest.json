@@ -1,6 +1,6 @@
 {
-  "version": "0.21.1",
-  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.21.1.zip",
-  "sha256": "fcfd3d55dbdc47f3ef6a2d6b46769daef4b587d55bea05b5d14b527fa186213a",
-  "notes": "自動EQの標準位置をEQの手前に変更（先にマイクの癖を補正→手動EQはそのまま味付けとして残る）"
+  "version": "0.22.0",
+  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.22.0.zip",
+  "sha256": "27669dfce2e42e2e140ec9d131d241748a9750868a6f7adcfa19ae6b268ae8b8",
+  "notes": "変更不可の内蔵プリセット「おまかせ」を追加：選ぶだけで全部自動（自動EQ・AIノイズ除去・帯域拡張）できれいな音に"
 }

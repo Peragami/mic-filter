@@ -217,6 +217,24 @@ Preset BuiltinAiPreset()
     return p;
 }
 
+Preset BuiltinAutoPreset()
+{
+    // "Omakase" (v0.22): select it and talk -- nothing to set. Every
+    // adaptive/automatic stage works: auto EQ corrects the mic, RNNoise
+    // removes the noise floor, bandwidth extension adds air, and the
+    // main window's passive gain rides the level. Manual values stay
+    // at their tuned defaults except a slightly firmer gate.
+    Preset p = DefaultPreset();
+    p.name = L"おまかせ";
+    p.on["rnnoise"] = true;
+    p.on["bwe"] = true;
+    p.on["spectral"] = false;  // RNNoise covers it
+    p.on["multiband"] = false; // RNNoise covers it
+    p.on["breath"] = true;     // keep breath sounds (user preference)
+    p.values["gateThresh"] = -46.0f;
+    return p;
+}
+
 Preset Normalized (Preset p)
 {
     // on: drop unknown, fill missing with defaults.
