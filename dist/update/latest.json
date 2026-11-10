@@ -1,6 +1,6 @@
 {
-  "version": "0.25.0",
-  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.25.0.zip",
-  "sha256": "9f252237be74279d073c87269c4e35841d3446cffa2d6a499bfe8df09b6c3fc0",
-  "notes": "出力音量スライダー追加（-12〜+12dB、保存される）／新規プリセットがメイン画面で選べない問題を修正／AI帯域拡張が無音時にノイズを持ち上げる問題を修正"
+  "version": "0.26.0",
+  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.26.0.zip",
+  "sha256": "2fa8bce3942138399f200c7fe4a729e17664abe848ab112dc35b0aca49054400",
+  "notes": "歌用プリセットを追加（ゲート弱め・吐息キープ・コンプ軽め・ノイズ除去系OFFでビブラート保護・帯域拡張で空気感）"
 }

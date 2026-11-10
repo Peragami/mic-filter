@@ -89,6 +89,7 @@ void EnsurePresetStore()
     WritePresetRaw (DefaultPreset());
     WritePresetRaw (BuiltinAiPreset());
     WritePresetRaw (BuiltinAutoPreset());
+    WritePresetRaw (BuiltinSingPreset());
 }
 
 std::vector<std::wstring> ListPresetNames()

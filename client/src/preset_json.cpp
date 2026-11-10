@@ -234,6 +234,31 @@ Preset BuiltinAutoPreset()
     return p;
 }
 
+Preset BuiltinSingPreset()
+{
+    // "Uta-you" (v0.26): singing. Speech settings fight the music --
+    // a firm gate chops soft phrases, a firm comp flattens dynamics,
+    // and denoisers eat vibrato and held notes. So: gate almost out of
+    // the way with breath kept (breathing is part of singing), comp
+    // only catching peaks, no RNNoise / spectral / multiband, gentler
+    // auto-EQ, a presence lift, and bandwidth extension for air.
+    Preset p = DefaultPreset();
+    p.name = L"歌用";
+    p.on["rnnoise"] = false;
+    p.on["spectral"] = false;
+    p.on["multiband"] = false;
+    p.on["bwe"] = true;
+    p.on["breath"] = true;
+    p.values["gateThresh"] = -58.0f;
+    p.values["compThresh"] = -12.0f;
+    p.values["compRatio"] = 2.0f;
+    p.values["eqMid"] = 1.0f;
+    p.values["eqHigh"] = 2.0f;
+    p.values["exciterMix"] = 0.30f;
+    p.values["autoEqAmount"] = 0.8f;
+    return p;
+}
+
 Preset Normalized (Preset p)
 {
     // on: drop unknown, fill missing with defaults.

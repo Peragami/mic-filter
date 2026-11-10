@@ -149,11 +149,14 @@ Preset BuiltinAiPreset();
 // The built-in zero-config preset: every automatic stage on, clean
 // sound with nothing to set.
 Preset BuiltinAutoPreset();
+// The built-in singing preset: gentle dynamics, breath kept, no
+// denoiser (protects vibrato / held notes), extra air on top.
+Preset BuiltinSingPreset();
 // Built-in presets are read-only in the app: the store re-writes them
 // with canonical content on startup and refuses to save/delete them.
 inline bool IsProtectedPreset (const std::wstring& name)
 {
-    return name == L"標準" || name == L"AIプリセット" || name == L"おまかせ";
+    return name == L"標準" || name == L"AIプリセット" || name == L"おまかせ" || name == L"歌用";
 }
 // Repair a parsed preset: unknown keys dropped, missing keys filled
 // with defaults, order made a permutation.
