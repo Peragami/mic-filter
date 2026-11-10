@@ -1,6 +1,6 @@
 {
-  "version": "0.26.0",
-  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.26.0.zip",
-  "sha256": "2fa8bce3942138399f200c7fe4a729e17664abe848ab112dc35b0aca49054400",
-  "notes": "歌用プリセットを追加（ゲート弱め・吐息キープ・コンプ軽め・ノイズ除去系OFFでビブラート保護・帯域拡張で空気感）"
+  "version": "0.27.0",
+  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.27.0.zip",
+  "sha256": "af32c93df2d99f930ebe871e0c23f21fe51ba8d1823dcad105c9c3f109d6f4fd",
+  "notes": "AI帯域拡張を自然に調整（有声の時だけしっかり効く／12kHz以上の上限／プリセット側の量も控えめに）。標準以外のプリセットの違和感対策"
 }

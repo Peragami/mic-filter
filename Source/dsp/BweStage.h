@@ -112,6 +112,7 @@ struct BweStage
         f[9] = (float) std::min (1.0, std::max (0.0, best));
         f[10] = (float) (10.0 * std::log10 (accRaw / kFrame + 1e-10));
         const float lvlDb = f[10];
+        const float voicing = f[9];
         // MLP forward.
         float h1[48], h2[48];
         for (int i = 0; i < 11; ++i) f[i] = (f[i] - bwe_weights::kMean[i]) / bwe_weights::kStd[i];
@@ -135,15 +136,30 @@ struct BweStage
         float gate = (lvlDb + 52.0f) / 10.0f;
         gate = std::min (1.0f, std::max (0.0f, gate));
         gate = gate * gate * (3.0f - 2.0f * gate); // smoothstep -52..-42 dB
+        // Voicing weight (v0.27): the synthetic excitation sounds fake
+        // exactly where the signal is NOT clearly voiced (breathy /
+        // noisy / transitional frames). Real harmonics extend
+        // believably; noise does not. Scale the extension by how voiced
+        // the frame is, keeping a floor so fricatives keep some air.
+        const float vweight = 0.35f + 0.65f * voicing;
+        // Per-band caps (v0.27): the 12-16 kHz band is where "fake air"
+        // turns tinkly; cap it well below the others.
+        static constexpr float kBandCapDb[3] = { 16.0f, 14.0f, 8.0f };
         for (int j = 0; j < 3; ++j)
         {
             float s = bwe_weights::kB3[j];
             for (int i = 0; i < 48; ++i) s += h2[i] * bwe_weights::kW3[i * 3 + j];
             float db = std::min (20.0f, std::max (-40.0f, s));
             db = -40.0f + (db + 40.0f) * gate;
+            db = -40.0f + (db + 40.0f) * vweight;
+            db = std::min (db, kBandCapDb[j]);
             db *= p.amount;
             const float target = std::pow (10.0f, db / 20.0f);
-            gainStep[j] = (target - gainCur[j]) / kFrame; // ramp over next frame
+            // Asymmetric smoothing (v0.27): rise within one frame, fall
+            // over ~5 frames, so the HF layer does not flutter at the
+            // frame rate when predictions alternate.
+            const float frames = target > gainCur[j] ? 1.0f : 5.0f;
+            gainStep[j] = (target - gainCur[j]) / (kFrame * frames);
         }
         for (int i = 0; i < 6; ++i) accSrc[i] = 0;
         for (int j = 0; j < 3; ++j) accExc[j] = 0;

@@ -1,11 +1,11 @@
 #pragma once
 
 #define VERSION_MAJOR 0
-#define VERSION_SUB   26
+#define VERSION_SUB   27
 #define VERSION_PATCH 0
 
-#define STRING_VERSION "0.26.0"
-#define FULL_VERSION_STR "0.26.0"
+#define STRING_VERSION "0.27.0"
+#define FULL_VERSION_STR "0.27.0"
 
 // Written out for the factory / bundle metadata.
 #define PLUGIN_NAME    "MicFilter"

@@ -213,6 +213,7 @@ Preset BuiltinAiPreset()
     p.on["bwe"] = true;
     p.on["spectral"] = false;  // RNNoise covers it
     p.on["multiband"] = false; // RNNoise covers it
+    p.values["bweAmount"] = 0.7f; // v0.27: gentler extension (user: others sound "off")
     return p;
 }
 
@@ -231,6 +232,7 @@ Preset BuiltinAutoPreset()
     p.on["multiband"] = false; // RNNoise covers it
     p.on["breath"] = true;     // keep breath sounds (user preference)
     p.values["gateThresh"] = -46.0f;
+    p.values["bweAmount"] = 0.7f; // v0.27: gentler extension
     return p;
 }
 
@@ -256,6 +258,7 @@ Preset BuiltinSingPreset()
     p.values["eqHigh"] = 2.0f;
     p.values["exciterMix"] = 0.30f;
     p.values["autoEqAmount"] = 0.8f;
+    p.values["bweAmount"] = 0.8f; // v0.27: air, but not full strength
     return p;
 }
 
