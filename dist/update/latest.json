@@ -1,6 +1,6 @@
 {
-  "version": "0.24.0",
-  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.24.0.zip",
-  "sha256": "229a2be7b84e701998e1445feb52ea0c8ecc832ef2fa87bace4a0e1e8a777e42",
-  "notes": "設定画面をグループ式リストに作り替え（グループ/各フィルターのON・OFF、ダブルクリックで個別設定、ソロ試聴）。並び順はグループ順に固定"
+  "version": "0.25.0",
+  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist/update/MicFilterClient-v0.25.0.zip",
+  "sha256": "9f252237be74279d073c87269c4e35841d3446cffa2d6a499bfe8df09b6c3fc0",
+  "notes": "出力音量スライダー追加（-12〜+12dB、保存される）／新規プリセットがメイン画面で選べない問題を修正／AI帯域拡張が無音時にノイズを持ち上げる問題を修正"
 }

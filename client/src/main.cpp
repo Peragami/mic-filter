@@ -44,6 +44,47 @@ std::vector<AudioDeviceInfo> g_renderDevices;
 float g_meterDisplay = 0.0f;
 bool g_running = false;
 
+// Output volume (v0.25): post-chain makeup gain, -12..+12 dB in 0.5 dB
+// steps. Global (not per-preset), persisted in settings.ini next to
+// the exe so it survives restarts and auto-updates.
+double g_outGainDb = 0.0;
+
+std::wstring SettingsIniPath()
+{
+    wchar_t exe[MAX_PATH] = {};
+    GetModuleFileNameW (nullptr, exe, MAX_PATH);
+    std::wstring p (exe);
+    const size_t slash = p.find_last_of (L"\\/");
+    if (slash != std::wstring::npos) p.resize (slash + 1);
+    return p + L"settings.ini";
+}
+void LoadOutGain()
+{
+    const int x2 = GetPrivateProfileIntW (L"client", L"OutGainDbX2", 0,
+                                          SettingsIniPath().c_str());
+    g_outGainDb = std::max (-12.0, std::min (12.0, x2 / 2.0));
+}
+void SaveOutGain()
+{
+    wchar_t buf[16];
+    swprintf_s (buf, L"%d", (int) std::lround (g_outGainDb * 2));
+    WritePrivateProfileStringW (L"client", L"OutGainDbX2", buf,
+                                SettingsIniPath().c_str());
+}
+void ApplyOutGain (HWND hwnd)
+{
+    const LRESULT pos = SendMessageW (Ctl (hwnd, IDC_OUT_LEVEL), TBM_GETPOS, 0, 0);
+    g_outGainDb = (int) pos / 2.0 - 12.0;
+    wchar_t buf[32];
+    if (g_outGainDb == 0.0) swprintf_s (buf, L"0 dB");
+    else swprintf_s (buf, L"%+.1f dB", g_outGainDb);
+    SetWindowTextW (Ctl (hwnd, IDC_OUT_LEVEL_VALUE), buf);
+    g_engine.SetParameter ((unsigned int) MicFilterParams::kOutGain,
+                           MicFilterParams::toNormalized (MicFilterParams::kOutGain,
+                                                          (float) g_outGainDb));
+    SaveOutGain();
+}
+
 // Device hot-plug tracking (IMMNotificationClient).
 IMMDeviceEnumerator* g_deviceEnumerator = nullptr;
 IMMNotificationClient* g_notificationClient = nullptr;
@@ -245,6 +286,9 @@ bool StartEngine (HWND hwnd)
         cfg.initialParams.push_back ({ (unsigned int) k.paramId,
                                        (double) MicFilterParams::toNormalized (k.paramId, plain) });
     }
+    cfg.initialParams.push_back ({ (unsigned int) MicFilterParams::kOutGain,
+                                   (double) MicFilterParams::toNormalized (
+                                       MicFilterParams::kOutGain, (float) g_outGainDb) });
     cfg.initialStageOrder = StageOrderIds (g_currentPreset);
     std::wstring err;
     if (!g_engine.Start (cfg, err))
@@ -346,6 +390,26 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 SetToggleText (dry, false, L"ドライ（全フィルターOFFの音を聞く）");
             }
 
+            LoadOutGain();
+            AddLabel (hwnd, L"出力音量（最終音量。上げすぎると大きな声が歪みます）", 16, 430, 470);
+            {
+                HWND lvl = make (CreateWindowW (TRACKBAR_CLASSW, L"",
+                                                WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_AUTOTICKS,
+                                                16, 452, 380, 28, hwnd,
+                                                reinterpret_cast<HMENU> ((INT_PTR) IDC_OUT_LEVEL),
+                                                nullptr, nullptr));
+                SendMessageW (lvl, TBM_SETRANGE, TRUE, MAKELPARAM (0, 48)); // -12..+12 dB, 0.5 steps
+                SendMessageW (lvl, TBM_SETPAGESIZE, 0, 4);
+                SendMessageW (lvl, TBM_SETPOS, TRUE, (LPARAM) std::lround ((g_outGainDb + 12.0) * 2));
+                wchar_t buf[32];
+                if (g_outGainDb == 0.0) swprintf_s (buf, L"0 dB");
+                else swprintf_s (buf, L"%+.1f dB", g_outGainDb);
+                make (CreateWindowW (L"STATIC", buf, WS_CHILD | WS_VISIBLE,
+                                     406, 456, 80, 20, hwnd,
+                                     reinterpret_cast<HMENU> ((INT_PTR) IDC_OUT_LEVEL_VALUE),
+                                     nullptr, nullptr));
+            }
+
             g_captureDevices = EnumerateCaptureDevices();
             g_renderDevices = EnumerateRenderDevices();
             LogDeviceList();
@@ -365,11 +429,11 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 wchar_t vbuf[64];
                 swprintf_s (vbuf, L"バージョン %hs", STRING_VERSION);
                 make (CreateWindowW (L"STATIC", vbuf, WS_CHILD | WS_VISIBLE,
-                                     16, 436, 200, 20, hwnd,
+                                     16, 496, 200, 20, hwnd,
                                      reinterpret_cast<HMENU> ((INT_PTR) IDC_VERSION_LABEL),
                                      nullptr, nullptr));
                 make (CreateWindowW (L"BUTTON", L"更新を確認", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                                     366, 432, 120, 26, hwnd,
+                                     366, 492, 120, 26, hwnd,
                                      reinterpret_cast<HMENU> ((INT_PTR) IDC_UPDATE_BUTTON),
                                      nullptr, nullptr));
             }
@@ -427,6 +491,11 @@ LRESULT CALLBACK WndProc (HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if ((HWND) lp == Ctl (hwnd, IDC_MIC_LEVEL))
             {
                 ApplyMicLevel (hwnd);
+                return 0;
+            }
+            if ((HWND) lp == Ctl (hwnd, IDC_OUT_LEVEL))
+            {
+                ApplyOutGain (hwnd);
                 return 0;
             }
             break;
@@ -600,7 +669,7 @@ int APIENTRY wWinMain (HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow)
 
     HWND hwnd = CreateWindowW (wc.lpszClassName, L"MicFilter クライアント",
                                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                               CW_USEDEFAULT, CW_USEDEFAULT, 540, 496,
+                               CW_USEDEFAULT, CW_USEDEFAULT, 540, 556,
                                nullptr, nullptr, hInst, nullptr);
     if (!hwnd) return 1;
     ShowWindow (hwnd, nShow);

@@ -77,6 +77,15 @@ void NotifyMainSelect (const std::wstring& name)
                       reinterpret_cast<LPARAM> (new std::wstring (name)));
 }
 
+// Tell the main window to rescan the presets folder (its combo only
+// refreshes on WM_PRESET_CHANGED). Needed after new / rename / delete
+// of a preset that is not the main window's current selection --
+// without this, a freshly created preset never appears over there.
+void NotifyMainRescan()
+{
+    if (g_parent) PostMessageW (g_parent, WM_PRESET_CHANGED, 0, 0);
+}
+
 std::wstring KnobValueText (const KnobDef& def, double v)
 {
     wchar_t buf[160];
@@ -830,6 +839,7 @@ void OnPresetNew()
     SavePreset (np);
     RefreshPresetCombo (name);
     LoadIntoEditor (name);
+    NotifyMainRescan();
 }
 
 void OnPresetRename()
@@ -854,6 +864,7 @@ void OnPresetRename()
         g_mainCurrent = name;
         NotifyMainSelect (name);
     }
+    else NotifyMainRescan();
     RefreshPresetCombo (name);
     LoadIntoEditor (name);
 }
@@ -872,6 +883,7 @@ void OnPresetDelete()
         g_mainCurrent = next;
         NotifyMainSelect (next);
     }
+    else NotifyMainRescan();
     RefreshPresetCombo (next);
     LoadIntoEditor (next);
 }

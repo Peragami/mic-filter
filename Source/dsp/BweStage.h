@@ -111,6 +111,7 @@ struct BweStage
         }
         f[9] = (float) std::min (1.0, std::max (0.0, best));
         f[10] = (float) (10.0 * std::log10 (accRaw / kFrame + 1e-10));
+        const float lvlDb = f[10];
         // MLP forward.
         float h1[48], h2[48];
         for (int i = 0; i < 11; ++i) f[i] = (f[i] - bwe_weights::kMean[i]) / bwe_weights::kStd[i];
@@ -126,11 +127,21 @@ struct BweStage
             for (int i = 0; i < 48; ++i) s += h1[i] * bwe_weights::kW2[i * 48 + j];
             h2[j] = std::tanh (s);
         }
+        // Level guard (v0.25): the MLP cannot tell quiet room noise from
+        // quiet voice -- measured +10 dB HF gains on -48 dB noise alone,
+        // which adds a fizzy HF layer in every pause. Below speech level,
+        // pull the gains toward the -40 dB floor (fricatives are loud, so
+        // the level term alone is enough; voicing is not required).
+        float gate = (lvlDb + 52.0f) / 10.0f;
+        gate = std::min (1.0f, std::max (0.0f, gate));
+        gate = gate * gate * (3.0f - 2.0f * gate); // smoothstep -52..-42 dB
         for (int j = 0; j < 3; ++j)
         {
             float s = bwe_weights::kB3[j];
             for (int i = 0; i < 48; ++i) s += h2[i] * bwe_weights::kW3[i * 3 + j];
-            const float db = std::min (20.0f, std::max (-40.0f, s)) * p.amount;
+            float db = std::min (20.0f, std::max (-40.0f, s));
+            db = -40.0f + (db + 40.0f) * gate;
+            db *= p.amount;
             const float target = std::pow (10.0f, db / 20.0f);
             gainStep[j] = (target - gainCur[j]) / kFrame; // ramp over next frame
         }

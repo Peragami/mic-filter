@@ -27,6 +27,32 @@ double bandRms (const float* b, int n, double sr, float lo, float hi)
 constexpr int SR = 48000;
 } // namespace
 
+// --- appended: noise-floor guard regression (v0.25) ---
+#include <cstdlib>
+namespace {
+int GuardCheck()
+{
+    std::srand (7);
+    pure2::BweStage st;
+    pure2::BweParams prm;
+    prm.on = true;
+    st.prepare (48000, prm);
+    double hf = 0, tot = 0;
+    int n = 0;
+    for (int i = 0; i < 48000 * 2; ++i)
+    {
+        const float noise = (float) (std::rand() / (double) RAND_MAX * 2 - 1) * 0.0068f; // ~-48 dB RMS
+        const float y = st.process (noise);
+        if (i > 48000) { hf += (double) y * y; ++n; } // crude: full-band of tail
+    }
+    const double rmsDb = 10.0 * std::log10 (hf / n + 1e-12);
+    // The BWE contribution must not lift the noise: output RMS should
+    // stay at/below about the input RMS (-48 dB) + a few dB.
+    std::printf ("noise-only out RMS: %.1f dB (must be < -44)\n", rmsDb);
+    return rmsDb < -44.0 ? 0 : 1;
+}
+}
+
 int main()
 {
     constexpr int N = SR * 3;
@@ -76,6 +102,7 @@ int main()
     // was quiet in the source after 2.7 s; check the final 200 ms).
     const double tail = bandRms (out + N - (int) (0.2 * SR), (int) (0.2 * SR), SR, 7000, 16000);
     check (tail < 0.004, "silence stays silent in HF (rms)", tail);
+    if (GuardCheck() != 0) { std::printf ("FAIL noise guard\n"); ++failures; }
     std::printf (failures == 0 ? "ALL PASS\n" : "FAILURES: %d\n", failures);
     return failures == 0 ? 0 : 1;
 }
