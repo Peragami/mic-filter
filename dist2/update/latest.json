@@ -1,6 +1,6 @@
 {
-  "version": "1.4.1",
-  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist2/update/MicFilterClient-v1.4.1.zip",
-  "sha256": "2fb0ddb11871e5fbe7ee6cdd549c92b268e0426917c5ebe4b7a3bc294f3023a9",
-  "notes": "再起動処理の不具合を修正（デバイス変更やバッファ増加のたびに開始失敗になっていた問題）"
+  "version": "1.5.0",
+  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist2/update/MicFilterClient-v1.5.0.zip",
+  "sha256": "c22ba93a6ec36380968b756b13d4c471ec324de03c81edaf0938467d3058b9c0",
+  "notes": "フィルター設定を追加（メイン画面のボタンから別ウィンドウ。ON/OFFとつまみ調整がその場で反映されます）"
 }
