@@ -1,6 +1,6 @@
 {
-  "version": "1.3.0",
-  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist2/update/MicFilterClient-v1.3.0.zip",
-  "sha256": "3733658c2343b8bc3ed8ce3619c84c7269d29aaad3c94154f85210310b213fe6",
-  "notes": "設定ファイル（settings.ini）をexeの横に出すようにしました"
+  "version": "1.3.1",
+  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist2/update/MicFilterClient-v1.3.1.zip",
+  "sha256": "197bf214f98b45143491c2b1ed8971a7bc65384b8d96bce126c5da77c6b8ef9f",
+  "notes": "ステータス表示の文字化けを修正（v1.2の実機報告）＋設定ファイルをexeの横に自動作成"
 }
