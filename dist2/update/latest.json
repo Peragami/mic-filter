@@ -1,6 +1,6 @@
 {
-  "version": "1.6.1",
-  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist2/update/MicFilterClient-v1.6.1.zip",
-  "sha256": "4a5d51a8cf95e5dd5649ad3b59b7d0e4e55131fc2d1b260f6c937128e586521b",
-  "notes": "表記を「フィルター設定」から「エフェクト設定」に変更"
+  "version": "1.7.0",
+  "url": "https://raw.githubusercontent.com/Peragami/mic-filter/main/dist2/update/MicFilterClient-v1.7.0.zip",
+  "sha256": "447d9eb351fa52759947bbbbdddf924d98831c599423f1f753684cded0e51bae",
+  "notes": "settings.ini に全設定と使用中プリセット名（LastPreset）を残すようにしました"
 }
